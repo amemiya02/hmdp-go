@@ -1,0 +1,23 @@
+# 服务器配置
+server:
+  port: 8081
+  mode: "debug"  # 运行模式：debug/release
+
+# MySQL 数据库配置
+mysql:
+  host: "127.0.0.1"
+  port: :3306
+  username: "root"
+  password: "root"
+  dbname: "hmdp"
+  charset: "utf8mb4"
+  max_open_conns: 20  # 最大连接数
+  max_idle_conns: 10   # 最大空闲连接数
+
+# Redis 配置
+redis:
+  host: "127.0.0.1"
+  port: :6379
+  password: ""
+  db: 0
+  timeout: 5000  # 超时时间(ms)
