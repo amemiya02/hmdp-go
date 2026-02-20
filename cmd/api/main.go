@@ -48,13 +48,22 @@ func registerRoutes(r *gin.Engine) {
 	userHandler := handler.NewUserHandler()
 	// 全局注册“刷新”中间件
 	// 这样无论访问哪个接口，只要有 token 都会续期
-	r.Use(middleware.RefreshTokenMiddleware())
+	r.Use(middleware.RefreshTokenInterceptor())
 	r.POST("/user/login", userHandler.Login)
 	r.POST("/user/code", userHandler.SendCode)
 	// 专门加上“登录校验”中间件
-	userGroup := r.Group("/user").Use(middleware.AuthMiddleware())
+	userGroup := r.Group("/user").Use(middleware.LoginInterceptor())
 	{
 		userGroup.GET("/me", userHandler.Me)
+		userGroup.GET("/info/:id", userHandler.Info)
+		userGroup.GET("/:id", userHandler.QueryUserByID)
+	}
+
+	// ShopType模块
+	shopTypeHandler := handler.NewShopTypeHandler()
+	shopTypeGroup := r.Group("/shop-type")
+	{
+		shopTypeGroup.GET("/list", shopTypeHandler.QueryShopTypeList)
 	}
 
 	// 后续补充：优惠券、秒杀、探店笔记等路由

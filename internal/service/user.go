@@ -110,3 +110,7 @@ func (us *UserService) createUserWithPhone(ctx context.Context, phone string) *e
 	}
 	return user
 }
+
+func (us *UserService) FindUserByID(ctx context.Context, id uint64) (*entity.User, error) {
+	return us.userRepo.FindUserById(ctx, id)
+}

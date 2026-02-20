@@ -10,7 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RefreshTokenMiddleware() gin.HandlerFunc {
+func RefreshTokenInterceptor() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 1.获取请求头中的token
 		token := c.GetHeader(constant.AUTHORIZATION_KEY)

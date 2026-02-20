@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func AuthMiddleware() gin.HandlerFunc {
+func LoginInterceptor() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 获取用户
 		_, exists := c.Get(constant.CONTEXT_USER_KEY)
