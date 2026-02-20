@@ -76,9 +76,7 @@ func QueryWithPassThrough[T any](
 }
 
 // QueryWithLogicalExpire 逻辑过期解决缓存击穿
-func QueryWithLogicalExpire[T any](
-	ctx context.Context, rdb *redis.Client, key string, lockKey string, ttl time.Duration, fallback func() (*T, error),
-) (*T, error) {
+func QueryWithLogicalExpire[T any](ctx context.Context, rdb *redis.Client, key string, lockKey string, ttl time.Duration, fallback func() (*T, error)) (*T, error) {
 	// 1. 查询Redis
 	jsonStr, err := rdb.Get(ctx, key).Result()
 	if errors.Is(err, redis.Nil) || jsonStr == "" {
@@ -133,6 +131,7 @@ func QueryWithMutex[T any](
 	// 1. 查redis
 	jsonStr, err := rdb.Get(ctx, key).Result()
 	if err == nil {
+		// 查到了但是要排除是不是我们放置的空字符串
 		if jsonStr == "" {
 			return nil, ErrPenetration
 		}
@@ -160,6 +159,7 @@ func QueryWithMutex[T any](
 		return nil, err
 	}
 	if t == nil {
+		// 没查到就弄一个空字符串 防止缓存穿透
 		rdb.Set(ctx, key, "", constant.CacheNilTTL*time.Minute)
 		return nil, ErrNotFound
 	}

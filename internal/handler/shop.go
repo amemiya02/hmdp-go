@@ -4,21 +4,18 @@ import (
 	"net/http"
 
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
+	"github.com/amemiya02/hmdp-go/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
 type ShopHandler struct {
-	// ShopService *service.ShopService
+	ShopService *service.ShopService
 }
 
 func NewShopHandler() *ShopHandler {
-	return &ShopHandler{}
-}
-
-// QueryShopTypeList 查询商铺类型列表
-func (sh *ShopHandler) QueryShopTypeList(c *gin.Context) {
-	// TODO: 调用 Service 查询并返回 dto.OkWithData(list)
-	c.JSON(http.StatusOK, dto.Ok())
+	return &ShopHandler{
+		ShopService: service.NewShopService(),
+	}
 }
 
 // QueryShopById 根据ID查询商铺信息
