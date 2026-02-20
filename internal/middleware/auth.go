@@ -10,7 +10,7 @@ import (
 func LoginInterceptor() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		// 获取用户
-		_, exists := c.Get(constant.CONTEXT_USER_KEY)
+		_, exists := c.Get(constant.ContextUserKey)
 		if !exists {
 			// 不存在 拦截请求 返回401
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{

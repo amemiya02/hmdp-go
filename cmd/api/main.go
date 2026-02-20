@@ -51,7 +51,7 @@ func registerRoutes(r *gin.Engine) {
 	r.Use(middleware.RefreshTokenInterceptor())
 	r.POST("/user/login", userHandler.Login)
 	r.POST("/user/code", userHandler.SendCode)
-	// 专门加上“登录校验”中间件
+	// 加上“登录校验”中间件
 	userGroup := r.Group("/user").Use(middleware.LoginInterceptor())
 	{
 		userGroup.GET("/me", userHandler.Me)
@@ -64,6 +64,13 @@ func registerRoutes(r *gin.Engine) {
 	shopTypeGroup := r.Group("/shop-type")
 	{
 		shopTypeGroup.GET("/list", shopTypeHandler.QueryShopTypeList)
+	}
+
+	// 注册商铺相关路由
+	shopHandler := handler.NewShopHandler()
+	shopGroup := r.Group("/shop")
+	{
+		shopGroup.GET("/:id", shopHandler.QueryShopById)
 	}
 
 	// 后续补充：优惠券、秒杀、探店笔记等路由

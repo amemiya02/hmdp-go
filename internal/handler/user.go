@@ -43,7 +43,7 @@ func (uh *UserHandler) SendCode(c *gin.Context) {
 }
 
 func (uh *UserHandler) Me(c *gin.Context) {
-	userDTO, exists := c.Get(constant.CONTEXT_USER_KEY)
+	userDTO, exists := c.Get(constant.ContextUserKey)
 	if exists {
 		c.JSON(http.StatusOK, dto.OkWithData(userDTO))
 		return

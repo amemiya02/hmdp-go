@@ -8,12 +8,12 @@ import (
 
 // IsPhoneInvalid 校验手机号是否无效（无效返回true）
 func IsPhoneInvalid(phone string) bool {
-	reg := regexp.MustCompile(constant.PHONE_REGEX)
+	reg := regexp.MustCompile(constant.PhoneRegex)
 	return !reg.MatchString(phone)
 }
 
 // IsVerifyCodeInvalid 校验验证码是否无效（6位数字/字母）
 func IsVerifyCodeInvalid(code string) bool {
-	reg := regexp.MustCompile(constant.VERIFY_CODE_REGEX)
+	reg := regexp.MustCompile(constant.VerifyCodeRegex)
 	return !reg.MatchString(code)
 }

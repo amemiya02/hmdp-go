@@ -37,8 +37,8 @@ func (us *UserService) SendCode(ctx context.Context, phone string) *dto.Result {
 	code := util.RandomNumbers(6)
 
 	// 4.保存验证码到 redis
-	key := constant.LOGIN_CODE_KEY + phone
-	expiration := time.Duration(constant.LOGIN_USER_TTL) * time.Minute
+	key := constant.LoginCodeKey + phone
+	expiration := time.Duration(constant.LoginUserTtl) * time.Minute
 	err := global.RedisClient.Set(ctx, key, code, expiration).Err()
 	if err != nil {
 		return dto.Fail(fmt.Sprintf("生成验证码失败！\n%s", err.Error()))
@@ -57,7 +57,7 @@ func (us *UserService) Login(ctx context.Context, loginForm dto.LoginForm) *dto.
 		return dto.Fail("手机号格式错误！")
 	}
 	// 3.从redis获取验证码并校验
-	cacheCode, err := global.RedisClient.Get(ctx, constant.LOGIN_CODE_KEY+phone).Result()
+	cacheCode, err := global.RedisClient.Get(ctx, constant.LoginCodeKey+phone).Result()
 	code := loginForm.Code
 	if err != nil || cacheCode != code {
 		// 不一致，报错
@@ -88,13 +88,13 @@ func (us *UserService) Login(ctx context.Context, loginForm dto.LoginForm) *dto.
 		"icon":     user.Icon,
 	}
 	// 7.3.存储
-	tokenKey := constant.LOGIN_USER_KEY + token
+	tokenKey := constant.LoginUserKey + token
 	if err := global.RedisClient.HSet(ctx, tokenKey, userMap).Err(); err != nil {
 		return dto.Fail("")
 	}
 
 	// 7.4.设置token有效期
-	global.RedisClient.Expire(ctx, tokenKey, constant.LOGIN_USER_TTL*time.Minute)
+	global.RedisClient.Expire(ctx, tokenKey, constant.LoginUserTtl*time.Minute)
 
 	// 8.返回token
 	return dto.OkWithData(token)
@@ -103,7 +103,7 @@ func (us *UserService) Login(ctx context.Context, loginForm dto.LoginForm) *dto.
 func (us *UserService) createUserWithPhone(ctx context.Context, phone string) *entity.User {
 	user := &entity.User{}
 	user.Phone = phone
-	user.NickName = constant.USER_NICK_NAME_PREFIX + util.RandomString(10)
+	user.NickName = constant.UserNickNamePrefix + util.RandomString(10)
 	err := us.userRepo.CreateUser(ctx, user)
 	if err != nil {
 		return nil
