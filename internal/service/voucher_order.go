@@ -14,6 +14,8 @@ import (
 	"github.com/amemiya02/hmdp-go/internal/repository"
 	"github.com/amemiya02/hmdp-go/internal/util"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redsync/redsync/v4"
+	"github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
@@ -25,6 +27,9 @@ const (
 	LockKeyPrefix  = "order:"
 	LockTimeOutSec = 100
 )
+
+// redsync 相关
+var globalRedsync *redsync.Redsync
 
 // ================== 异步秒杀相关 BEGIN =====================
 //
@@ -40,6 +45,9 @@ var orderTasks = make(chan *entity.VoucherOrder, 1024*1024)
 // 利用 Go 的 init() 函数，在程序一启动时就开启后台消费协程
 // 相当于 Java 里的 @PostConstruct 加上 new Thread().start()
 func init() {
+	// redsync 连接池
+	pool := goredis.NewPool(global.RedisClient)
+	globalRedsync = redsync.New(pool)
 	// 开启一个后台协程，专门负责从队列里取订单并写数据库
 	go handleVoucherOrderTask()
 }
@@ -59,12 +67,19 @@ func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) {
 	// 使用 context.Background() 给后台任务一个完全独立的生命周期！
 	// 这样不管前端用户是不是断网了，这个数据库写入都一定会坚决执行到底。
 	c := context.Background()
-
-	// 不加锁了 redis已经保证安全 但是为了兜底也可以加锁，逻辑和createVoucherOrder一样
 	userId := order.UserID
 	voucherId := order.VoucherID
-	orderCount, err := vos.VoucherOrderRepository.CountVoucherOrderByUserIdAndVoucherId(c, userId, voucherId)
+	// 其实可以不加锁 redis已经保证安全
+	// 但是为了兜底也可以加锁，逻辑和createVoucherOrder一样 这里演示redsync的使用
+	lockName := LockKeyPrefix + strconv.FormatUint(userId, 10)
+	mutex := globalRedsync.NewMutex(lockName)
+	if err := mutex.Lock(); err != nil {
+		global.Logger.Error(err)
+		return
+	}
+	defer mutex.Unlock()
 
+	orderCount, err := vos.VoucherOrderRepository.CountVoucherOrderByUserIdAndVoucherId(c, userId, voucherId)
 	if err != nil {
 		global.Logger.Error(err)
 		return
@@ -210,6 +225,7 @@ func (vos *VoucherOrderService) createVoucherOrder(c context.Context, voucherId 
 	// 3. 创建自定义的 Redis 分布式锁实例
 	// redisLock := util.NewSimpleRedisLock(c, lockName, global.RedisClient)
 	redisLock := util.NewRedissonLock(c, lockName, global.RedisClient, 10*time.Second)
+
 	// 4. 尝试获取锁，设置 10 秒超时时间（防止应用宕机导致死锁）
 	isLocked := redisLock.TryLock(LockTimeOutSec)
 	if !isLocked {
