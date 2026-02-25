@@ -3,9 +3,9 @@ package handler
 import (
 	"net/http"
 
-	"github.com/amemiya02/hmdp-go/internal/constant"
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
 	"github.com/amemiya02/hmdp-go/internal/service"
+	"github.com/amemiya02/hmdp-go/internal/util"
 	"github.com/gin-gonic/gin"
 )
 
@@ -43,12 +43,12 @@ func (uh *UserHandler) SendCode(c *gin.Context) {
 }
 
 func (uh *UserHandler) Me(c *gin.Context) {
-	userDTO, exists := c.Get(constant.ContextUserKey)
-	if exists {
-		c.JSON(http.StatusOK, dto.OkWithData(userDTO))
+	userDTO := util.GetUser(c)
+	if userDTO == nil {
+		c.JSON(http.StatusOK, dto.Fail("用户不存在！"))
 		return
 	}
-	c.JSON(http.StatusOK, dto.Fail("用户不存在！"))
+	c.JSON(http.StatusOK, dto.OkWithData(userDTO))
 }
 
 func (uh *UserHandler) Info(c *gin.Context) {
@@ -59,14 +59,7 @@ func (uh *UserHandler) Info(c *gin.Context) {
 		c.JSON(http.StatusOK, dto.Fail(err.Error()))
 		return
 	}
-	ui, err := uh.UserInfoService.FindUserInfoById(c, req.ID)
-	if ui == nil || err != nil {
-		// 没有详情，应该是第一次查看详情
-		c.JSON(http.StatusOK, dto.Ok())
-		return
-	}
-
-	c.JSON(http.StatusOK, dto.OkWithData(ui))
+	c.JSON(http.StatusOK, uh.UserInfoService.FindUserInfoById(c, req.ID))
 }
 
 func (uh *UserHandler) QueryUserByID(c *gin.Context) {
@@ -77,12 +70,5 @@ func (uh *UserHandler) QueryUserByID(c *gin.Context) {
 		c.JSON(http.StatusOK, dto.Fail(err.Error()))
 		return
 	}
-
-	user, err := uh.UserService.FindUserByID(c, req.ID)
-	if user == nil || err != nil {
-		c.JSON(http.StatusOK, dto.Fail("查询用户失败！"))
-		return
-	}
-
-	c.JSON(http.StatusOK, dto.OkWithData(user))
+	c.JSON(http.StatusOK, uh.UserService.FindUserByID(c, req.ID))
 }

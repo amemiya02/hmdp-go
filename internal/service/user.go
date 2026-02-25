@@ -111,6 +111,10 @@ func (us *UserService) createUserWithPhone(ctx context.Context, phone string) *e
 	return user
 }
 
-func (us *UserService) FindUserByID(ctx context.Context, id uint64) (*entity.User, error) {
-	return us.userRepo.FindUserById(ctx, id)
+func (us *UserService) FindUserByID(ctx context.Context, id uint64) *dto.Result {
+	user, err := us.userRepo.FindUserById(ctx, id)
+	if user == nil || err != nil {
+		return dto.Fail("查询用户失败！")
+	}
+	return dto.OkWithData(user)
 }

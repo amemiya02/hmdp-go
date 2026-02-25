@@ -75,7 +75,9 @@ func QueryWithPassThrough[T any](
 	return t, nil
 }
 
-// QueryWithLogicalExpire 逻辑过期解决缓存击穿
+// QueryWithLogicalExpire 既然我们知道某家店是“超级热点”（比如今晚 8 点要搞大型秒杀活动），我们绝对不会等用户进来了才去触发数据库查询和缓存写入。
+// 正确的做法是：在活动开始前的下午，程序员或者运营人员会在后台点一个按钮，把这些热点数据提前塞进 Redis 里，并且给它们加上“逻辑过期时间”。这个过程就叫缓存预热。
+// 逻辑过期解决缓存击穿
 func QueryWithLogicalExpire[T any](ctx context.Context, rdb *redis.Client, key string, lockKey string, ttl time.Duration, fallback func() (*T, error)) (*T, error) {
 	// 1. 查询Redis
 	jsonStr, err := rdb.Get(ctx, key).Result()

@@ -16,6 +16,20 @@ import (
 func main() {
 	global.Logger.Info("Starting...")
 
+	//  注册路由
+	r := SetupRouter()
+
+	//  启动服务
+	port := config.GlobalConfig.Server.Port
+	global.Logger.Info("server start on port %d\n", port)
+	if err := r.Run(fmt.Sprintf(":%d", port)); err != nil {
+		panic("server start failed: " + err.Error())
+	}
+}
+
+// SetupRouter 注册所有路由
+func SetupRouter() *gin.Engine {
+
 	//  初始化Gin引擎
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
@@ -30,19 +44,6 @@ func main() {
 		// 预检请求缓存时间
 		MaxAge: 12 * time.Hour,
 	}))
-	//  注册路由
-	registerRoutes(r)
-
-	//  启动服务
-	port := config.GlobalConfig.Server.Port
-	global.Logger.Info("server start on port %d\n", port)
-	if err := r.Run(fmt.Sprintf(":%d", port)); err != nil {
-		panic("server start failed: " + err.Error())
-	}
-}
-
-// registerRoutes 注册所有路由
-func registerRoutes(r *gin.Engine) {
 
 	// 用户模块
 	userHandler := handler.NewUserHandler()
@@ -71,7 +72,32 @@ func registerRoutes(r *gin.Engine) {
 	shopGroup := r.Group("/shop")
 	{
 		shopGroup.GET("/:id", shopHandler.QueryShopById)
+		shopGroup.POST("", shopHandler.SaveShop)
+		shopGroup.PUT("", shopHandler.UpdateShop)
+		shopGroup.GET("/of/type", shopHandler.QueryShopByType)
+		shopGroup.GET("/of/name", shopHandler.QueryShopByName)
 	}
 
-	// 后续补充：优惠券、秒杀、探店笔记等路由
+	// 秒杀券相关路由
+	voucherHandler := handler.NewVoucherHandler()
+	voucherGroup := r.Group("/voucher")
+	{
+		voucherGroup.POST("/seckill", voucherHandler.AddSeckillVoucher)
+		voucherGroup.POST("", voucherHandler.AddVoucher)
+		voucherGroup.GET("/list/:shopId", voucherHandler.QueryVoucherOfShop)
+	}
+	voucherOrderHandler := handler.NewVoucherOrderHandler()
+	voucherOrderGroup := r.Group("/voucher-order").Use(middleware.LoginInterceptor())
+	{
+		voucherOrderGroup.POST("/seckill/:id", voucherOrderHandler.SeckillVoucher)
+	}
+
+	// blog
+	blogHandler := handler.NewBlogHandler()
+	blogGroup := r.Group("/blog")
+	{
+		blogGroup.GET("/hot", blogHandler.QueryHotBlog)
+	}
+
+	return r
 }

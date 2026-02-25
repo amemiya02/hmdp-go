@@ -2,10 +2,10 @@ package dto
 
 // Result 统一响应结构体
 type Result struct {
-	Success  bool        `json:"success"`  // 是否成功
-	ErrorMsg string      `json:"errorMsg"` // 错误信息
-	Data     interface{} `json:"data"`     // 响应数据
-	Total    int64       `json:"total"`    // 总数（分页用）
+	Success  bool        `json:"success"`            // 是否成功
+	ErrorMsg string      `json:"errorMsg,omitempty"` // 错误信息
+	Data     interface{} `json:"data,omitempty"`     // 响应数据
+	Total    int64       `json:"total,omitempty"`    // 总数（分页用）
 }
 
 // Ok 成功响应（无数据）
