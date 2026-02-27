@@ -9,7 +9,8 @@ import (
 
 var RedisClient *redis.Client
 
-func InitRedis() {
+// 初始化redis客户端
+func init() {
 	cfg := config.GlobalConfig.Redis
 	RedisClient = redis.NewClient(&redis.Options{
 		Addr:     cfg.Host + cfg.Port,
@@ -23,8 +24,4 @@ func InitRedis() {
 	}
 
 	Logger.Info("Connected to Redis...")
-}
-
-func init() {
-	InitRedis()
 }

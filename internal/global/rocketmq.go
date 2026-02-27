@@ -12,8 +12,9 @@ var (
 	RMQConsumer rocketmq.PushConsumer
 )
 
-// InitRocketMQ 初始化 RocketMQ
-func InitRocketMQ() {
+// 初始化 RocketMQ
+func init() {
+
 	var err error
 	cfg := config.GlobalConfig.RocketMQ
 	// 1. 初始化生产者
@@ -39,8 +40,4 @@ func InitRocketMQ() {
 	if err != nil {
 		Logger.Fatalf("创建 RocketMQ 消费者失败: %s", err.Error())
 	}
-}
-
-func init() {
-	InitRocketMQ()
 }

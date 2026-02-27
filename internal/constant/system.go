@@ -7,4 +7,5 @@ const (
 	DefaultPageSize    = 5
 	MaxPageSize        = 10
 	OrderIdPrefix      = "order"
+	ImageUploadDir     = "/opt/homebrew/opt/nginx/html/hmdp/imgs"
 )

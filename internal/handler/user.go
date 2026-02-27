@@ -2,7 +2,10 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
+	"github.com/amemiya02/hmdp-go/internal/constant"
+	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
 	"github.com/amemiya02/hmdp-go/internal/service"
 	"github.com/amemiya02/hmdp-go/internal/util"
@@ -72,3 +75,17 @@ func (uh *UserHandler) QueryUserByID(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, uh.UserService.FindUserByID(c, req.ID))
 }
+
+func (uh *UserHandler) Logout(c *gin.Context) {
+	userId := util.GetUserId(c)
+	if userId == 0 {
+		return
+	}
+	global.RedisClient.Del(c, constant.LoginUserKey+strconv.FormatUint(userId, 10))
+	c.JSON(http.StatusOK, dto.Ok())
+}
+
+// TODO
+func (uh *UserHandler) Sign(c *gin.Context) {}
+
+func (uh *UserHandler) SignCount(c *gin.Context) {}

@@ -34,17 +34,31 @@ func (sr *ShopRepository) SaveShop(c context.Context, shop entity.Shop) error {
 
 func (sr *ShopRepository) QueryShopByName(c context.Context, name string, current int) ([]entity.Shop, int64, error) {
 	var list []entity.Shop
-	// 注意current 是页码
-	if err := global.Db.WithContext(c).Model(&entity.Shop{}).Where("name like %?%", name).Offset((current - 1) * constant.MaxPageSize).Limit(constant.MaxPageSize).Find(&list).Error; err != nil {
+
+	// 注意这里：把 % 和 name 拼接在一起作为参数传进去
+	searchName := "%" + name + "%"
+
+	// 查询当前页的数据
+	if err := global.Db.WithContext(c).
+		Model(&entity.Shop{}).
+		Where("name LIKE ?", searchName).
+		Offset((current - 1) * constant.MaxPageSize).
+		Limit(constant.MaxPageSize).
+		Find(&list).Error; err != nil {
 		return nil, 0, err
 	}
+
+	// 查询符合条件的总数
 	var total int64
-	if err := global.Db.WithContext(c).Model(&entity.Shop{}).Where("name like %?%", name).Count(&total).Error; err != nil {
+	if err := global.Db.WithContext(c).
+		Model(&entity.Shop{}).
+		Where("name LIKE ?", searchName).
+		Count(&total).Error; err != nil {
 		return nil, 0, err
 	}
+
 	return list, total, nil
 }
-
 func (sr *ShopRepository) QueryShopByType(c context.Context, typeId uint64, current int) ([]entity.Shop, error) {
 	var list []entity.Shop
 	offset := constant.DefaultPageSize * (current - 1)

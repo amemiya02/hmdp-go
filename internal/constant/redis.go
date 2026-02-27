@@ -12,7 +12,8 @@ const (
 	CacheShopTTL    = 30
 	LockShopKey     = "lock:shop:"
 	BlogLikedKey    = "blog:liked:"
-	SeckillOrderKey = "seckill:order:"
+	FeedKey         = "feed:"
+	FollowKey       = "follow:"
 )
 
 // 过期时间常量

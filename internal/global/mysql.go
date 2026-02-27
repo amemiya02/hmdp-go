@@ -11,8 +11,8 @@ import (
 
 var Db *gorm.DB
 
-// InitDb 初始化MySQL连接
-func InitDb() {
+// 初始化MySQL连接
+func init() {
 	cfg := config.GlobalConfig.MySQL
 	username := cfg.Username
 	password := cfg.Password
@@ -43,8 +43,4 @@ func InitDb() {
 	Logger.Info("Connected to MySQL...")
 
 	Db = db
-}
-
-func init() {
-	InitDb()
 }

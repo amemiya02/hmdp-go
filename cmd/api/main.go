@@ -60,6 +60,7 @@ func SetupRouter() *gin.Engine {
 		userGroup.GET("/me", userHandler.Me)
 		userGroup.GET("/info/:id", userHandler.Info)
 		userGroup.GET("/:id", userHandler.QueryUserByID)
+		userGroup.POST("/logout", userHandler.Logout)
 	}
 
 	// ShopType模块
@@ -106,6 +107,22 @@ func SetupRouter() *gin.Engine {
 		blogGroup.GET("/likes/:id", blogHandler.QueryBlogLikes)
 		blogGroup.GET("/of/user", blogHandler.QueryBlogByUserId)
 		blogGroup.GET("/of/follow", blogHandler.QueryBlogOfFollow)
+	}
+
+	// upload 路由
+	uploadHandler := handler.NewUploadHandler()
+	uploadGroup := r.Group("/upload")
+	{
+		uploadGroup.POST("/blog", uploadHandler.UploadBlogImage)
+		uploadGroup.DELETE("/blog/delete", uploadHandler.DeleteBlogImage)
+	}
+
+	followHandler := handler.NewFollowHandler()
+	followGroup := r.Group("/follow").Use(middleware.LoginInterceptor())
+	{
+		followGroup.PUT("/:id/:isFollow", followHandler.Follow)
+		followGroup.GET("/or/not/:id", followHandler.IsFollow)
+		followGroup.GET("/common/:id", followHandler.FollowCommons)
 	}
 
 	return r
