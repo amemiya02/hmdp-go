@@ -1,20 +1,19 @@
-package config
+package global
 
 import (
 	"time"
 
-	"github.com/amemiya02/hmdp-go/internal/global"
+	"github.com/amemiya02/hmdp-go/config"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
-// MySQLClient MySQL客户端实例
-var MySQLClient *gorm.DB
+var Db *gorm.DB
 
 // InitDb 初始化MySQL连接
 func InitDb() {
-	cfg := GlobalConfig.MySQL
+	cfg := config.GlobalConfig.MySQL
 	username := cfg.Username
 	password := cfg.Password
 	host := cfg.Host
@@ -28,20 +27,24 @@ func InitDb() {
 	})
 
 	if err != nil {
-		global.Logger.Fatal("Failed to init db", err.Error())
+		Logger.Fatal("Failed to init db", err.Error())
 	}
 
 	sqlDB, err := db.DB()
 
 	if err != nil {
-		global.Logger.Fatal("Failed to init db", err.Error())
+		Logger.Fatal("Failed to init db", err.Error())
 	}
 
 	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
 	sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	global.Logger.Info("Connected to MySQL...")
+	Logger.Info("Connected to MySQL...")
 
-	global.Db = db
+	Db = db
+}
+
+func init() {
+	InitDb()
 }

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	_ "github.com/amemiya02/hmdp-go/internal/global"
+
 	"github.com/amemiya02/hmdp-go/config"
 	_ "github.com/amemiya02/hmdp-go/config"
 	"github.com/amemiya02/hmdp-go/internal/global"
@@ -94,9 +96,16 @@ func SetupRouter() *gin.Engine {
 
 	// blog
 	blogHandler := handler.NewBlogHandler()
-	blogGroup := r.Group("/blog")
+	r.GET("/blog/hot", blogHandler.QueryHotBlog)
+	blogGroup := r.Group("/blog").Use(middleware.LoginInterceptor())
 	{
-		blogGroup.GET("/hot", blogHandler.QueryHotBlog)
+		blogGroup.POST("", blogHandler.SaveBlog)
+		blogGroup.PUT("/like/:id", blogHandler.LikeBlog)
+		blogGroup.GET("/of/me", blogHandler.QueryMyBlog)
+		blogGroup.GET("/:id", blogHandler.QueryBlogById)
+		blogGroup.GET("/likes/:id", blogHandler.QueryBlogLikes)
+		blogGroup.GET("/of/user", blogHandler.QueryBlogByUserId)
+		blogGroup.GET("/of/follow", blogHandler.QueryBlogOfFollow)
 	}
 
 	return r

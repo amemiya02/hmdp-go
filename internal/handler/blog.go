@@ -29,3 +29,17 @@ func (h *BlogHandler) QueryHotBlog(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, h.BlogService.QueryHotBlog(c, req.Current))
 }
+
+func (h *BlogHandler) SaveBlog(c *gin.Context) {}
+
+func (h *BlogHandler) LikeBlog(c *gin.Context) {}
+
+func (h *BlogHandler) QueryMyBlog(c *gin.Context) {}
+
+func (h *BlogHandler) QueryBlogById(c *gin.Context) {}
+
+func (h *BlogHandler) QueryBlogLikes(c *gin.Context) {}
+
+func (h *BlogHandler) QueryBlogByUserId(c *gin.Context) {}
+
+func (h *BlogHandler) QueryBlogOfFollow(c *gin.Context) {}

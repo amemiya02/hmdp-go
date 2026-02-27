@@ -4,7 +4,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/spf13/viper"
 )
 
@@ -62,19 +61,16 @@ func InitGlobalConfig() {
 	v.SetConfigFile(configPath)
 
 	if err := v.ReadInConfig(); err != nil {
-		global.Logger.Fatalf("Error reading config file: %s", err.Error())
+		panic(err)
 	}
 
 	GlobalConfig = &Config{}
 
 	if err := v.Unmarshal(GlobalConfig); err != nil {
-		global.Logger.Fatalf("Error unmarshalling config: %s", err.Error())
+		panic(err)
 	}
 }
 
 func init() {
 	InitGlobalConfig()
-	InitDb()
-	InitRedis()
-	InitRocketMQ()
 }
