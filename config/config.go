@@ -8,20 +8,21 @@ import (
 	"github.com/spf13/viper"
 )
 
-// 根配置结构体
+// Config 根配置结构体
 type Config struct {
-	Server ServerConfig `mapstructure:"server"`
-	MySQL  MySQLConfig  `mapstructure:"mysql"`
-	Redis  RedisConfig  `mapstructure:"redis"`
+	Server   ServerConfig   `mapstructure:"server"`
+	MySQL    MySQLConfig    `mapstructure:"mysql"`
+	Redis    RedisConfig    `mapstructure:"redis"`
+	RocketMQ RocketMQConfig `mapstructure:"rocketmq"`
 }
 
-// 服务器配置
+// ServerConfig 服务器配置
 type ServerConfig struct {
 	Port int    `mapstructure:"port"`
 	Mode string `mapstructure:"mode"`
 }
 
-// MySQL配置
+// MySQLConfig MySQL配置
 type MySQLConfig struct {
 	Host         string `mapstructure:"host"`
 	Port         string `mapstructure:"port"`
@@ -33,13 +34,21 @@ type MySQLConfig struct {
 	MaxIdleConns int    `mapstructure:"max_idle_conns"`
 }
 
-// Redis配置
+// RedisConfig Redis配置
 type RedisConfig struct {
 	Host     string        `mapstructure:"host"`
 	Port     string        `mapstructure:"port"`
 	Password string        `mapstructure:"password"`
 	Db       int           `mapstructure:"db"`
 	Timeout  time.Duration `mapstructure:"timeout"`
+}
+
+// RocketMQConfig RocketMQ配置
+type RocketMQConfig struct {
+	NameServers []string `mapstructure:"name_servers"`
+	GroupName   string   `mapstructure:"group_name"`
+	Topic       string   `mapstructure:"topic"`
+	Retries     int      `mapstructure:"retries"`
 }
 
 var GlobalConfig *Config
@@ -67,4 +76,5 @@ func init() {
 	InitGlobalConfig()
 	InitDb()
 	InitRedis()
+	InitRocketMQ()
 }

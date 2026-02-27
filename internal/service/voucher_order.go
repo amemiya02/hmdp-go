@@ -7,13 +7,17 @@ import (
 	"sync"
 	"time"
 
+	"encoding/json"
+
+	"github.com/amemiya02/hmdp-go/config"
 	"github.com/amemiya02/hmdp-go/internal/constant"
 	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
 	"github.com/amemiya02/hmdp-go/internal/model/entity"
 	"github.com/amemiya02/hmdp-go/internal/repository"
 	"github.com/amemiya02/hmdp-go/internal/util"
-	"github.com/gin-gonic/gin"
+	"github.com/apache/rocketmq-client-go/v2/consumer"
+	"github.com/apache/rocketmq-client-go/v2/primitive"
 	"github.com/go-redsync/redsync/v4"
 	"github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
@@ -49,7 +53,9 @@ func init() {
 	pool := goredis.NewPool(global.RedisClient)
 	globalRedsync = redsync.New(pool)
 	// 开启一个后台协程，专门负责从队列里取订单并写数据库
-	go handleVoucherOrderTask()
+	// go handleVoucherOrderTask()
+	// 启动消费者订阅 MQ 消息
+	go StartVoucherOrderConsumer()
 }
 
 // 3. 后台消费协程的具体逻辑
@@ -60,6 +66,40 @@ func handleVoucherOrderTask() {
 	for order := range orderTasks {
 		global.Logger.Infof("【异步任务】收到订单，开始写入数据库: 订单号=%d, 用户=%d", order.ID, order.UserID)
 		service.handleVoucherOrder(order)
+	}
+}
+
+// StartVoucherOrderConsumer 启动rocketmq消费者
+func StartVoucherOrderConsumer() {
+	service := NewVoucherOrderService()
+
+	var f = func(ctx context.Context, ext ...*primitive.MessageExt) (consumer.ConsumeResult, error) {
+		for _, msg := range ext {
+			var order entity.VoucherOrder
+			// 反序列化 JSON 到实体
+			if err := json.Unmarshal(msg.Body, &order); err != nil {
+				global.Logger.Errorf("消息解析失败: %v", err)
+				return consumer.ConsumeSuccess, nil // 解析失败的消息直接丢弃或转入死信队列
+			}
+
+			global.Logger.Infof("【异步任务-RocketMQ】收到订单，开始写入数据库: 订单号=%d", order.ID)
+
+			// 调用原有的入库逻辑
+			service.handleVoucherOrder(&order)
+		}
+		return consumer.ConsumeSuccess, nil
+	}
+
+	err := global.RMQConsumer.Subscribe(config.GlobalConfig.RocketMQ.Topic, consumer.MessageSelector{}, f)
+
+	if err != nil {
+		global.Logger.Fatalf("RocketMQ 订阅失败: %s", err.Error())
+	}
+
+	// 启动消费者
+	err = global.RMQConsumer.Start()
+	if err != nil {
+		global.Logger.Fatalf("RocketMQ 消费者启动失败: %s", err.Error())
 	}
 }
 
@@ -126,11 +166,65 @@ func NewVoucherOrderService() *VoucherOrderService {
 	}
 }
 
+// SeckillVoucherByRedisAndRocketMQ 将阻塞队列channel改为RocketMQ消息队列
+func (vos *VoucherOrderService) SeckillVoucherByRedisAndRocketMQ(c context.Context, voucherId uint64) *dto.Result {
+	userId := util.GetUserId(c)
+	if userId == 0 {
+		return dto.Fail("请先登录！")
+	}
+	orderId, err := util.NextId(c, global.RedisClient, constant.OrderIdPrefix)
+	if err != nil {
+		return dto.Fail(err.Error())
+	}
+
+	// 1. 执行 lua 脚本 (仅检查，预扣库存和防重)
+	result, err := seckillScript.Run(c, global.RedisClient, []string{}, voucherId, userId).Result()
+	if err != nil {
+		return dto.Fail(err.Error())
+	}
+	r := result.(int64)
+	if r == 1 {
+		return dto.Fail("库存不足！")
+	}
+	if r == 2 {
+		return dto.Fail("不能重复下单！")
+	}
+
+	voucherOrder := &entity.VoucherOrder{
+		ID:        orderId,
+		UserID:    userId,
+		VoucherID: voucherId,
+	}
+
+	// 2. 将订单序列化为 JSON
+	orderBytes, err := json.Marshal(voucherOrder)
+	if err != nil {
+		return dto.Fail("消息序列化失败")
+	}
+
+	// 3. 将订单丢进 RocketMQ 而不是channel
+	msg := &primitive.Message{
+		Topic: config.GlobalConfig.RocketMQ.Topic, // 对应你在 config 里配置的 Topic
+		Body:  orderBytes,
+	}
+
+	// 使用 SendAsync 异步发送，或者 SendSync 同步发送（这里为了确保不丢数据，建议用 Sync，虽然慢一点点但安全）
+	_, err = global.RMQProducer.SendSync(c, msg)
+	if err != nil {
+		global.Logger.Errorf("发送下单消息到 RocketMQ 失败: %v", err)
+		// 理论上这里如果发送 MQ 失败，需要回滚 Redis 的库存，属于分布式事务范畴，实际中可以做补偿重试机制
+		return dto.Fail("系统繁忙，请稍后再试！")
+	}
+
+	// 4. 返回订单号给前端
+	return dto.OkWithData(orderId)
+}
+
 // SeckillVoucherByRedis 基于redis和lua脚本的异步秒杀抢券
 // 优化思路 同步变异步 同步是先判断库存 然后一人一单 然后完成数据库写入 然后返回
 // 改为异步 用redis完成库存余量 一人一单判断，完成抢单业务 直接返回
 // 具体的下单业务 操作数据库等耗时的 放入阻塞队列channel 利用独立线程异步下单
-func (vos *VoucherOrderService) SeckillVoucherByRedis(c *gin.Context, voucherId uint64) *dto.Result {
+func (vos *VoucherOrderService) SeckillVoucherByRedis(c context.Context, voucherId uint64) *dto.Result {
 	userId := util.GetUserId(c)
 	if userId == 0 {
 		return dto.Fail("请先登录！")
@@ -160,7 +254,7 @@ func (vos *VoucherOrderService) SeckillVoucherByRedis(c *gin.Context, voucherId 
 		VoucherID: voucherId,
 	}
 
-	// 2. 将订单丢进 Channel (平替 Java 的 orderTasks.add/put)
+	// 2. 将订单丢进 Channel
 	// 这一行代码执行极快，丢进去之后立刻向前端返回 200 OK，真正的数据库写入交给后台协程！
 	orderTasks <- voucherOrder
 
@@ -169,7 +263,7 @@ func (vos *VoucherOrderService) SeckillVoucherByRedis(c *gin.Context, voucherId 
 }
 
 // SeckillVoucher 基于redis分布式锁的秒杀抢券 读写数据库操作频繁
-func (vos *VoucherOrderService) SeckillVoucher(c *gin.Context, voucherId uint64) *dto.Result {
+func (vos *VoucherOrderService) SeckillVoucher(c context.Context, voucherId uint64) *dto.Result {
 	// 1. 查询基础信息和判断时间
 	voucher, err := vos.SeckillVoucherService.SeckillVoucherRepository.QuerySeckillVoucherById(c, voucherId)
 	if err != nil {

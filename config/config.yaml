@@ -21,3 +21,13 @@ redis:
   password: ""
   db: 0
   timeout: 5000  # 超时时间(ms)
+
+rocketmq:
+  name_servers:
+    - "127.0.0.1:9876"
+  # 消费者和生产者的基础组名（用于集群管理和负载均衡）
+  group_name: "seckill_voucher_group"
+  # 存放秒杀订单消息的 Topic 名称
+  topic: "seckill_order_topic"
+  # 消息发送失败时的重试次数（保障高可用）
+  retries: 2

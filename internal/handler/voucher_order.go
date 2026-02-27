@@ -25,5 +25,5 @@ func (vo *VoucherOrderHandler) SeckillVoucher(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, vo.VoucherOrderService.SeckillVoucherByRedis(c, req.ID))
+	c.JSON(http.StatusOK, vo.VoucherOrderService.SeckillVoucherByRedisAndRocketMQ(c, req.ID))
 }
