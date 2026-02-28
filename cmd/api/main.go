@@ -61,6 +61,8 @@ func SetupRouter() *gin.Engine {
 		userGroup.GET("/info/:id", userHandler.Info)
 		userGroup.GET("/:id", userHandler.QueryUserByID)
 		userGroup.POST("/logout", userHandler.Logout)
+		userGroup.POST("/sign", userHandler.Sign)
+		userGroup.GET("/sign/count", userHandler.SignCount)
 	}
 
 	// ShopType模块

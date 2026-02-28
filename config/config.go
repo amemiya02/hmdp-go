@@ -2,6 +2,7 @@ package config
 
 import (
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/spf13/viper"
@@ -52,12 +53,20 @@ type RocketMQConfig struct {
 
 var GlobalConfig *Config
 
-func InitGlobalConfig() {
+func init() {
 	// 设置Viper基础配置
 	v := viper.New()
 	// 配置文件路径（相对于项目根目录）
 	v.SetConfigType("yaml")
-	configPath := filepath.Join("config", "config.yaml")
+	// 这里用绝对路径是为了让test也能加载config
+	// --- 获取当前 config.go 文件所在的绝对路径 ---
+	_, filename, _, _ := runtime.Caller(0)
+	// filename 是绝对路径: /Users/.../hmdp-go/config/config.go
+	// filepath.Dir(filename) 就是 config 目录的绝对路径
+	configDir := filepath.Dir(filename)
+
+	// 拼接真正的配置文件绝对路径
+	configPath := filepath.Join(configDir, "config.yaml")
 	v.SetConfigFile(configPath)
 
 	if err := v.ReadInConfig(); err != nil {
@@ -69,8 +78,4 @@ func InitGlobalConfig() {
 	if err := v.Unmarshal(GlobalConfig); err != nil {
 		panic(err)
 	}
-}
-
-func init() {
-	InitGlobalConfig()
 }

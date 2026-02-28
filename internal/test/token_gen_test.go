@@ -8,11 +8,10 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/amemiya02/hmdp-go/config"
+	"github.com/amemiya02/hmdp-go/internal/global"
+
 	"github.com/amemiya02/hmdp-go/internal/constant"
-	"github.com/redis/go-redis/v9"
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 
 	"github.com/amemiya02/hmdp-go/internal/model/entity"
 	"github.com/google/uuid"
@@ -21,21 +20,9 @@ import (
 func TestGenerate1000Tokens(t *testing.T) {
 	ctx := context.Background()
 
-	dsn := "root:123456@tcp(127.0.0.1:3306)/hmdp?charset=utf8mb4&parseTime=True&loc=Local"
-
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
-	})
-
-	RC := redis.NewClient(&redis.Options{
-		Addr:     "localhost:6379",
-		Password: "",
-		DB:       0,
-	})
-
 	// 1. 从数据库查出前 1000 个用户
 	var users []entity.User
-	err = db.WithContext(ctx).Limit(1000).Find(&users).Error
+	err := global.Db.WithContext(ctx).Limit(1000).Find(&users).Error
 	if err != nil {
 		t.Fatalf("查询用户失败: %v", err)
 	}
@@ -48,7 +35,7 @@ func TestGenerate1000Tokens(t *testing.T) {
 	defer file.Close()
 
 	// 3. 开启 Redis Pipeline，极速批量写入，拒绝频繁的网络 IO！
-	pipe := RC.Pipeline()
+	pipe := global.RedisClient.Pipeline()
 
 	for _, user := range users {
 		// 生成去划线的 UUID 作为 Token

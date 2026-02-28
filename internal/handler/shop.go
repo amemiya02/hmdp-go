@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
 	"github.com/amemiya02/hmdp-go/internal/model/entity"
@@ -59,20 +60,24 @@ func (sh *ShopHandler) UpdateShop(c *gin.Context) {
 	c.JSON(http.StatusOK, dto.Ok())
 }
 
-func (sh *ShopHandler) QueryShopByType(c *gin.Context) {
-	// TODO
-	var req struct {
-		TypeId  uint64  `form:"typeId"`
-		Current int     `form:"current" default:"1"`
-		X       float64 `form:"x"`
-		Y       float64 `form:"y"`
-	}
-	if err := c.ShouldBindQuery(&req); err != nil {
-		c.JSON(http.StatusBadRequest, dto.Fail(err.Error()))
-		return
-	}
+// QueryShopByType 根据类型分页查询商户 (GET /shop/of/type)
+func (h *ShopHandler) QueryShopByType(c *gin.Context) {
+	// 1. 获取必填参数
+	typeIdStr := c.Query("typeId")
+	currentStr := c.DefaultQuery("current", "1")
 
-	c.JSON(http.StatusOK, sh.ShopService.QueryShopByType(c, req.TypeId, req.Current, req.X, req.Y))
+	typeId, _ := strconv.ParseUint(typeIdStr, 10, 64)
+	current, _ := strconv.Atoi(currentStr)
+
+	// 2. 获取可选坐标参数 x, y (经度, 纬度)
+	x := c.Query("x")
+	y := c.Query("y")
+	// 3. 解析坐标和计算分页参数
+	lon, _ := strconv.ParseFloat(x, 64)
+	lat, _ := strconv.ParseFloat(y, 64)
+	// 4. 传给 Service
+	result := h.ShopService.QueryShopByType(c, typeId, current, lon, lat)
+	c.JSON(http.StatusOK, result)
 }
 
 func (sh *ShopHandler) QueryShopByName(c *gin.Context) {

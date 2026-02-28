@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"strconv"
+	"strings"
 
 	"github.com/amemiya02/hmdp-go/internal/constant"
 	"github.com/amemiya02/hmdp-go/internal/global"
@@ -59,12 +61,56 @@ func (sr *ShopRepository) QueryShopByName(c context.Context, name string, curren
 
 	return list, total, nil
 }
-func (sr *ShopRepository) QueryShopByType(c context.Context, typeId uint64, current int) ([]entity.Shop, error) {
-	var list []entity.Shop
-	offset := constant.DefaultPageSize * (current - 1)
-	err := global.Db.WithContext(c).Where("type_id = ?", typeId).Offset(offset).Limit(constant.DefaultPageSize).Find(&list).Error
+
+// QueryShopsByType 普通数据库分页查询 (无坐标时走这里)
+func (sr *ShopRepository) QueryShopsByType(ctx context.Context, typeId uint64, current int) ([]*entity.Shop, error) {
+	shops := make([]*entity.Shop, 0)
+	offset := (current - 1) * constant.DefaultPageSize
+
+	err := global.Db.WithContext(ctx).
+		Where("type_id = ?", typeId).
+		Offset(offset).
+		Limit(constant.DefaultPageSize).
+		Find(&shops).Error
+
+	return shops, err
+}
+
+// QueryShopsByIdsWithOrder 根据 IDs 批量查询商户，严格按照传入的 ID 数组顺序返回 (GEO 查询时走这里)
+func (sr *ShopRepository) QueryShopsByIdsWithOrder(ctx context.Context, ids []uint64) ([]*entity.Shop, error) {
+	if len(ids) == 0 {
+		return make([]*entity.Shop, 0), nil
+	}
+
+	// 1. 构造 ORDER BY FIELD
+	idStrs := make([]string, len(ids))
+	// 把int类型的id转为string类型
+	for i, id := range ids {
+		idStrs[i] = strconv.FormatUint(id, 10)
+	}
+	// 拼接id1,id2, ...,idn这样的字符串
+	idListStr := strings.Join(idStrs, ",")
+	// 拼接order by field的字符串
+	orderByField := "FIELD(id, " + idListStr + ")"
+
+	shops := make([]*entity.Shop, 0)
+
+	// 2. 执行查询
+	err := global.Db.WithContext(ctx).
+		Where("id IN ?", ids).
+		Order(orderByField).
+		Find(&shops).Error
+
+	return shops, err
+}
+
+// QueryAllShops 查询数据库中所有的店铺信息 (用于数据预热)
+func (sr *ShopRepository) QueryAllShops(ctx context.Context) ([]*entity.Shop, error) {
+	shops := make([]*entity.Shop, 0)
+	// 查询所有店铺
+	err := global.Db.WithContext(ctx).Find(&shops).Error
 	if err != nil {
 		return nil, err
 	}
-	return list, nil
+	return shops, nil
 }
