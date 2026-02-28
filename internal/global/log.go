@@ -1,13 +1,12 @@
 package global
 
 import (
-	"github.com/sirupsen/logrus"
+	"log/slog"
+	"os"
 )
 
-var (
-	Logger *logrus.Logger
-)
+var Logger *slog.Logger
 
 func init() {
-	Logger = logrus.New()
+	Logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 }

@@ -115,6 +115,7 @@ func (br *BlogRepository) QueryBlogsByIdsWithOrder(ctx context.Context, ids []ui
 	idListStr := strings.Join(idStrs, ",")
 
 	// 2. 拼接完整的 ORDER BY 语句
+	// 根据id列排序 序是idListStr的序
 	orderByField := "FIELD(id, " + idListStr + ")"
 
 	blogs := make([]*entity.Blog, 0)

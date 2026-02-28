@@ -36,20 +36,20 @@ func (h *UploadHandler) UploadBlogImage(c *gin.Context) {
 	// 3. 生成新文件名和目录
 	fileName, destPath, err := createNewFileName(ext)
 	if err != nil {
-		global.Logger.Errorf("生成文件路径失败: %v", err)
+		global.Logger.Error(fmt.Sprintf("生成文件路径失败: %v", err))
 		c.JSON(http.StatusOK, dto.Fail("系统繁忙，文件路径生成失败"))
 		return
 	}
 
 	// 4. 保存文件到本地磁盘 (对应 image.transferTo(...))
 	if err := c.SaveUploadedFile(file, destPath); err != nil {
-		global.Logger.Errorf("文件保存失败: %v", err)
+		global.Logger.Error(fmt.Sprintf("文件保存失败: %v", err))
 		c.JSON(http.StatusOK, dto.Fail("文件保存失败"))
 		return
 	}
 
 	// 5. 返回结果 (返回相对路径给前端)
-	global.Logger.Debugf("文件上传成功，%s", fileName)
+	global.Logger.Debug(fmt.Sprintf("文件上传成功，%s", fileName))
 	c.JSON(http.StatusOK, dto.OkWithData(fileName))
 }
 
@@ -76,7 +76,6 @@ func (h *UploadHandler) DeleteBlogImage(c *gin.Context) {
 	err = os.Remove(fullPath)
 	// 如果错误不是"文件不存在"（说明真报错了），则记录日志
 	if err != nil && !os.IsNotExist(err) {
-		global.Logger.Errorf("删除文件失败: %v", err)
 		c.JSON(http.StatusOK, dto.Fail("文件删除失败"))
 		return
 	}

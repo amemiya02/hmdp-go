@@ -44,7 +44,7 @@ func (us *UserService) SendCode(ctx context.Context, phone string) *dto.Result {
 		return dto.Fail(fmt.Sprintf("生成验证码失败！\n%s", err.Error()))
 	}
 	// 5.发送验证码
-	global.Logger.Infof("发送短信验证码成功，验证码：%s", code)
+	global.Logger.Info(fmt.Sprintf("发送短信验证码成功，验证码：%s", code))
 	// 返回ok
 	return dto.Ok()
 }

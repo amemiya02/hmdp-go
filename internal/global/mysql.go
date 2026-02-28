@@ -27,13 +27,13 @@ func init() {
 	})
 
 	if err != nil {
-		Logger.Fatal("Failed to init db", err.Error())
+		Logger.Error(err.Error())
 	}
 
 	sqlDB, err := db.DB()
 
 	if err != nil {
-		Logger.Fatal("Failed to init db", err.Error())
+		Logger.Error(err.Error())
 	}
 
 	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)

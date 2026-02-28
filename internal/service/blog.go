@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -98,7 +99,7 @@ func (bs *BlogService) CreateBlog(c context.Context, blog *entity.Blog) *dto.Res
 	follows, err := bs.FollowRepository.QueryFollowsByFollowUserId(c, user.ID)
 	if err != nil {
 		// 查询粉丝失败属于非核心链路错误，只打日志，不阻塞笔记发布的成功返回
-		global.Logger.Errorf("查询粉丝列表失败: %v", err)
+		global.Logger.Error(fmt.Sprintf("查询粉丝列表失败: %v", err))
 		return dto.OkWithData(blog.ID)
 	}
 	// 4.推送笔记id给所有粉丝
@@ -113,7 +114,7 @@ func (bs *BlogService) CreateBlog(c context.Context, blog *entity.Blog) *dto.Res
 		}).Err()
 		if err != nil {
 			// 推送给某个粉丝失败，打个日志，继续给下一个人推（不要直接 return 报错）
-			global.Logger.Errorf("向粉丝 [%d] 推送笔记 [%d] 失败: %v", followerId, blog.ID, err)
+			global.Logger.Error(fmt.Sprintf("向粉丝 [%d] 推送笔记 [%d] 失败: %v", followerId, blog.ID, err))
 		}
 	}
 
@@ -139,7 +140,6 @@ func (bs *BlogService) QueryMyBlog(ctx context.Context, current int) *dto.Result
 	// 调用 Repo 层查询数据库
 	blogs, err := bs.BlogRepository.QueryBlogsByUserId(ctx, userId, current)
 	if err != nil {
-		global.Logger.Errorf("查询我的笔记失败: %v", err)
 		return dto.Fail("查询失败，请稍后再试")
 	}
 
@@ -163,7 +163,6 @@ func (bs *BlogService) LikeBlog(ctx context.Context, blogId uint64) *dto.Result 
 		// 2.1 数据库点赞数 + 1
 		rowsAffected, dbErr := bs.BlogRepository.UpdateBlogLikeCount(ctx, blogId, true)
 		if dbErr != nil {
-			global.Logger.Errorf("点赞失败, db err: %v", dbErr)
 			return dto.Fail("点赞失败")
 		}
 
@@ -179,7 +178,6 @@ func (bs *BlogService) LikeBlog(ctx context.Context, blogId uint64) *dto.Result 
 		// 3.1 数据库点赞数 - 1
 		rowsAffected, dbErr := bs.BlogRepository.UpdateBlogLikeCount(ctx, blogId, false)
 		if dbErr != nil {
-			global.Logger.Errorf("取消点赞失败, db err: %v", dbErr)
 			return dto.Fail("取消点赞失败")
 		}
 
@@ -189,7 +187,6 @@ func (bs *BlogService) LikeBlog(ctx context.Context, blogId uint64) *dto.Result 
 		}
 	} else {
 		// Redis 查询发生其他异常
-		global.Logger.Errorf("查询点赞状态失败: %v", err)
 		return dto.Fail("系统繁忙，请稍后再试")
 	}
 
@@ -251,6 +248,7 @@ func (bs *BlogService) QueryBlogOfFollow(ctx context.Context, max int64, offset 
 		return dto.Fail("请先登录！")
 	}
 
+	// REV代表从大到小 byscore代表不根据角标查询而是根据分数查询
 	// 2. 查询收件箱 ZREVRANGEBYSCORE key max 0 LIMIT offset count
 	key := constant.FeedKey + strconv.FormatUint(userId, 10)
 
@@ -258,13 +256,12 @@ func (bs *BlogService) QueryBlogOfFollow(ctx context.Context, max int64, offset 
 		Max:    strconv.FormatInt(max, 10),
 		Min:    "0", // 最小时间戳为0
 		Offset: int64(offset),
-		Count:  2, // Java原版代码写死了查2条，实际生产中可以适当调大(如10条)
+		Count:  constant.ScrollResultPageSize,
 	}
 
 	// 使用 WithScores 带上分数一起查出来
 	typedTuples, err := global.RedisClient.ZRevRangeByScoreWithScores(ctx, key, op).Result()
 	if err != nil {
-		global.Logger.Errorf("查询 Feed 流失败: %v", err)
 		return dto.Fail("查询动态失败")
 	}
 
@@ -291,11 +288,13 @@ func (bs *BlogService) QueryBlogOfFollow(ctx context.Context, max int64, offset 
 		}
 
 		// 4.2 获取分数(时间戳) 并计算下一次的 offset
-		time := int64(tuple.Score)
-		if time == minTime {
+		curTime := int64(tuple.Score)
+		// 因为返回的结果是按score从大到小排序的 所以从头开始遍历后 到最后一定是最小的时间
+		if curTime == minTime {
 			os++
 		} else {
-			minTime = time
+			// 因为数组有大到小的序 不一样的话 curTime 肯定小于当前的mintime 直接更新
+			minTime = curTime
 			os = 1 // 只要出现了新的更小的时间戳，就把 offset 重置为 1
 		}
 	}
@@ -303,7 +302,6 @@ func (bs *BlogService) QueryBlogOfFollow(ctx context.Context, max int64, offset 
 	// 5. 根据 id 查询 blog，并保持 Redis 中的时间倒序
 	blogs, err := bs.BlogRepository.QueryBlogsByIdsWithOrder(ctx, ids)
 	if err != nil {
-		global.Logger.Errorf("根据 ids 查询博客失败: %v", err)
 		return dto.Fail("查询动态详情失败")
 	}
 
@@ -316,8 +314,8 @@ func (bs *BlogService) QueryBlogOfFollow(ctx context.Context, max int64, offset 
 	// 7. 封装并返回
 	scrollResult := &dto.ScrollResult{
 		List:    blogs,
-		MinTime: minTime,
-		Offset:  os,
+		MinTime: minTime, // 本次的最小时间戳 下次的最大值
+		Offset:  os,      // 下次查询跳过几个score为mintime的
 	}
 
 	return dto.OkWithData(scrollResult)

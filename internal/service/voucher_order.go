@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	_ "embed"
+	"fmt"
 	"strconv"
 	"sync"
 	"time"
@@ -64,7 +65,7 @@ func handleVoucherOrderTask() {
 	// 重点：对 channel 使用 for...range 循环
 	// 它会自动阻塞等待。如果有数据进来了，就会立刻拿到 order 并执行循环体；如果没数据，它就在这乖乖睡觉，不消耗 CPU。
 	for order := range orderTasks {
-		global.Logger.Infof("【异步任务】收到订单，开始写入数据库: 订单号=%d, 用户=%d", order.ID, order.UserID)
+		global.Logger.Info(fmt.Sprintf("【异步任务】收到订单，开始写入数据库: 订单号=%d, 用户=%d", order.ID, order.UserID))
 		service.handleVoucherOrder(order)
 	}
 }
@@ -78,11 +79,10 @@ func StartVoucherOrderConsumer() {
 			var order entity.VoucherOrder
 			// 反序列化 JSON 到实体
 			if err := json.Unmarshal(msg.Body, &order); err != nil {
-				global.Logger.Errorf("消息解析失败: %v", err)
 				return consumer.ConsumeSuccess, nil // 解析失败的消息直接丢弃或转入死信队列
 			}
 
-			global.Logger.Infof("【异步任务-RocketMQ】收到订单，开始写入数据库: 订单号=%d", order.ID)
+			global.Logger.Info(fmt.Sprintf("【异步任务-RocketMQ】收到订单，开始写入数据库: 订单号=%d", order.ID))
 
 			// 调用原有的入库逻辑
 			service.handleVoucherOrder(&order)
@@ -93,13 +93,13 @@ func StartVoucherOrderConsumer() {
 	err := global.RMQConsumer.Subscribe(config.GlobalConfig.RocketMQ.Topic, consumer.MessageSelector{}, f)
 
 	if err != nil {
-		global.Logger.Fatalf("RocketMQ 订阅失败: %s", err.Error())
+		global.Logger.Error(fmt.Sprintf("RocketMQ 订阅失败: %s", err.Error()))
 	}
 
 	// 启动消费者
 	err = global.RMQConsumer.Start()
 	if err != nil {
-		global.Logger.Fatalf("RocketMQ 消费者启动失败: %s", err.Error())
+		global.Logger.Error(fmt.Sprintf("RocketMQ 消费者启动失败: %s", err.Error()))
 	}
 }
 
@@ -114,14 +114,14 @@ func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) {
 	lockName := LockKeyPrefix + strconv.FormatUint(userId, 10)
 	mutex := globalRedsync.NewMutex(lockName)
 	if err := mutex.Lock(); err != nil {
-		global.Logger.Error(err)
+		global.Logger.Error(err.Error())
 		return
 	}
 	defer mutex.Unlock()
 
 	orderCount, err := vos.VoucherOrderRepository.CountVoucherOrderByUserIdAndVoucherId(c, userId, voucherId)
 	if err != nil {
-		global.Logger.Error(err)
+		global.Logger.Error(err.Error())
 		return
 	}
 
@@ -148,7 +148,7 @@ func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) {
 	}
 	err = global.Db.WithContext(c).Transaction(tran)
 	if err != nil {
-		global.Logger.Error(err)
+		global.Logger.Error(err.Error())
 	}
 }
 
@@ -211,7 +211,6 @@ func (vos *VoucherOrderService) SeckillVoucherByRedisAndRocketMQ(c context.Conte
 	// 使用 SendAsync 异步发送，或者 SendSync 同步发送（这里为了确保不丢数据，建议用 Sync，虽然慢一点点但安全）
 	_, err = global.RMQProducer.SendSync(c, msg)
 	if err != nil {
-		global.Logger.Errorf("发送下单消息到 RocketMQ 失败: %v", err)
 		// 理论上这里如果发送 MQ 失败，需要回滚 Redis 的库存，属于分布式事务范畴，实际中可以做补偿重试机制
 		return dto.Fail("系统繁忙，请稍后再试！")
 	}
