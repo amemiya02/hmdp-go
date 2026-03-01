@@ -23,7 +23,7 @@ func main() {
 
 	//  启动服务
 	port := config.GlobalConfig.Server.Port
-	global.Logger.Info("server start on port %d\n", port)
+	global.Logger.Info(fmt.Sprintf("server start on port %d", port))
 	if err := r.Run(fmt.Sprintf(":%d", port)); err != nil {
 		panic("server start failed: " + err.Error())
 	}

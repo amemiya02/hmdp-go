@@ -17,11 +17,10 @@ import (
 	"github.com/amemiya02/hmdp-go/internal/model/entity"
 	"github.com/amemiya02/hmdp-go/internal/repository"
 	"github.com/amemiya02/hmdp-go/internal/util"
-	"github.com/apache/rocketmq-client-go/v2/consumer"
-	"github.com/apache/rocketmq-client-go/v2/primitive"
 	"github.com/go-redsync/redsync/v4"
 	"github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
+	"github.com/segmentio/kafka-go"
 	"gorm.io/gorm"
 )
 
@@ -70,37 +69,41 @@ func handleVoucherOrderTask() {
 	}
 }
 
-// StartVoucherOrderConsumer 启动rocketmq消费者
+// StartVoucherOrderConsumer 启动kafka消费者
 func StartVoucherOrderConsumer() {
 	service := NewVoucherOrderService()
 
-	var f = func(ctx context.Context, ext ...*primitive.MessageExt) (consumer.ConsumeResult, error) {
-		for _, msg := range ext {
-			var order entity.VoucherOrder
-			// 反序列化 JSON 到实体
-			if err := json.Unmarshal(msg.Body, &order); err != nil {
-				return consumer.ConsumeSuccess, nil // 解析失败的消息直接丢弃或转入死信队列
-			}
+	// 初始化 Kafka Reader (消费者)
+	reader := kafka.NewReader(kafka.ReaderConfig{
+		Brokers: config.GlobalConfig.Kafka.Brokers,
+		GroupID: config.GlobalConfig.Kafka.GroupID,
+		Topic:   config.GlobalConfig.Kafka.Topic,
+	})
 
-			global.Logger.Info(fmt.Sprintf("【异步任务-RocketMQ】收到订单，开始写入数据库: 订单号=%d", order.ID))
+	defer reader.Close()
+	global.Logger.Info("Kafka 消费者已启动，正在监听订单消息...")
 
-			// 调用原有的入库逻辑
-			service.handleVoucherOrder(&order)
+	for {
+		// ReadMessage 会自动提交 offset
+		msg, err := reader.ReadMessage(context.Background())
+		if err != nil {
+			global.Logger.Error("读取 Kafka 消息失败: " + err.Error())
+			continue
 		}
-		return consumer.ConsumeSuccess, nil
+
+		var order entity.VoucherOrder
+		// 反序列化 JSON 到实体
+		if err := json.Unmarshal(msg.Value, &order); err != nil {
+			global.Logger.Error("消息反序列化失败: " + err.Error())
+			continue
+		}
+
+		global.Logger.Info(fmt.Sprintf("【异步任务-Kafka】收到订单，开始写入数据库: 订单号=%d", order.ID))
+
+		// 调用原有的入库逻辑
+		service.handleVoucherOrder(&order)
 	}
 
-	err := global.RMQConsumer.Subscribe(config.GlobalConfig.RocketMQ.Topic, consumer.MessageSelector{}, f)
-
-	if err != nil {
-		global.Logger.Error(fmt.Sprintf("RocketMQ 订阅失败: %s", err.Error()))
-	}
-
-	// 启动消费者
-	err = global.RMQConsumer.Start()
-	if err != nil {
-		global.Logger.Error(fmt.Sprintf("RocketMQ 消费者启动失败: %s", err.Error()))
-	}
 }
 
 func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) {
@@ -166,8 +169,8 @@ func NewVoucherOrderService() *VoucherOrderService {
 	}
 }
 
-// SeckillVoucherByRedisAndRocketMQ 将阻塞队列channel改为RocketMQ消息队列
-func (vos *VoucherOrderService) SeckillVoucherByRedisAndRocketMQ(c context.Context, voucherId uint64) *dto.Result {
+// SeckillVoucherByRedisAndKafka 将阻塞队列channel改为Kafka消息队列
+func (vos *VoucherOrderService) SeckillVoucherByRedisAndKafka(c context.Context, voucherId uint64) *dto.Result {
 	userId := util.GetUserId(c)
 	if userId == 0 {
 		return dto.Fail("请先登录！")
@@ -202,16 +205,16 @@ func (vos *VoucherOrderService) SeckillVoucherByRedisAndRocketMQ(c context.Conte
 		return dto.Fail("消息序列化失败")
 	}
 
-	// 3. 将订单丢进 RocketMQ 而不是channel
-	msg := &primitive.Message{
-		Topic: config.GlobalConfig.RocketMQ.Topic, // 对应你在 config 里配置的 Topic
-		Body:  orderBytes,
+	// 3. 将订单丢进 Kafka
+	msg := kafka.Message{
+		Key:   []byte(strconv.FormatUint(userId, 10)), // 用 userId 做 Key，保证同一个用户的订单打到同一个 Partition
+		Value: orderBytes,
 	}
 
-	// 使用 SendAsync 异步发送，或者 SendSync 同步发送（这里为了确保不丢数据，建议用 Sync，虽然慢一点点但安全）
-	_, err = global.RMQProducer.SendSync(c, msg)
+	// 使用 WriteMessages 发送消息
+	err = global.KafkaWriter.WriteMessages(c, msg)
 	if err != nil {
-		// 理论上这里如果发送 MQ 失败，需要回滚 Redis 的库存，属于分布式事务范畴，实际中可以做补偿重试机制
+		global.Logger.Error("Kafka 消息发送失败: " + err.Error())
 		return dto.Fail("系统繁忙，请稍后再试！")
 	}
 

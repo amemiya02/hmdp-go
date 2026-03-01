@@ -10,10 +10,10 @@ import (
 
 // Config 根配置结构体
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	MySQL    MySQLConfig    `mapstructure:"mysql"`
-	Redis    RedisConfig    `mapstructure:"redis"`
-	RocketMQ RocketMQConfig `mapstructure:"rocketmq"`
+	Server ServerConfig `mapstructure:"server"`
+	MySQL  MySQLConfig  `mapstructure:"mysql"`
+	Redis  RedisConfig  `mapstructure:"redis"`
+	Kafka  KafkaConfig  `mapstructure:"kafka"`
 }
 
 // ServerConfig 服务器配置
@@ -43,12 +43,11 @@ type RedisConfig struct {
 	Timeout  time.Duration `mapstructure:"timeout"`
 }
 
-// RocketMQConfig RocketMQ配置
-type RocketMQConfig struct {
-	NameServers []string `mapstructure:"name_servers"`
-	GroupName   string   `mapstructure:"group_name"`
-	Topic       string   `mapstructure:"topic"`
-	Retries     int      `mapstructure:"retries"`
+// KafkaConfig Kafka配置
+type KafkaConfig struct {
+	Brokers []string `mapstructure:"brokers"`
+	Topic   string   `mapstructure:"topic"`
+	GroupID string   `mapstructure:"group_id"`
 }
 
 var GlobalConfig *Config
