@@ -127,1111 +127,373 @@
 
 ## 使用 Redis 对高频访问的信息进行缓存，降低了数据库查询的压力,解决了缓存穿透、雪崩、击穿问题
 
-**什么是缓存穿透，怎么解决？**
+### 什么是缓存穿透，怎么解决？
 
 ![image](https://github.com/user-attachments/assets/30fdea5c-f0ef-46f8-ab6f-cbfd65e78072)
 
-*定义：* 1.用户请求的id在缓存中不存在。
-        2.恶意用户伪造不存在的id发起请求。
-     
-大量并发去访问一个数据库不存在的数据，由于缓存中没有该数据导致大量并发查询数据库，这个现象叫缓存穿透。
-缓存穿透可以造成数据库瞬间压力过大，连接数等资源用完，最终数据库拒绝连接不可用。
+**定义：**
+大量并发请求去访问一个**数据库中根本不存在的数据**。由于缓存中没有该数据，导致请求全部打到数据库，而数据库也查不到数据，因此也无法写入缓存。这种现象叫缓存穿透。这会造成数据库瞬间压力过大、连接数等资源耗尽，最终导致数据库拒绝连接甚至宕机。
+常见场景：1. 用户请求的 ID 在数据库中不存在；2. 恶意攻击者伪造大量不存在的 ID 发起请求。
 
-*解决方法：*
+**解决方法：**
 
-1.对请求增加校验机制
+1. **对请求增加校验机制**
+   例如：在 HTTP 接入层或中间件拦截，如果字段 ID 是长整型，若请求携带的格式不符或为负数，则直接返回错误。
+2. **使用布隆过滤器**
+   
+   ![image](https://github.com/user-attachments/assets/86652912-0713-426c-a842-0366067c4225)
 
-eg:字段id是长整型，如果发来的不是长整型则直接返回
+一句话总结布隆过滤器：一个名叫 Bloom 的人提出了一种来检索元素是否在给定大集合中的数据结构，这种数据结构是高效且性能很好的，但缺点是具有一定的错误识别率和删除难度。并且，理论情况下，添加到集合中的元素越多，误报的可能性就越大。布隆过滤器说某个元素存在，小概率会误判。布隆过滤器说某个元素不在，那么这个元素一定不在。
 
-2.使用布隆过滤器
+   为了避免穿透，可以在缓存前加一层布隆过滤器。系统启动时进行预热，将存在的商品/课程 ID 存入布隆过滤器；新增数据时同步写入。查询时，先判断 ID 是否在布隆过滤器中，如果不存在则直接拦截返回。
+3. **缓存空值或特殊值（本项目应用方案）**
 
-![image](https://github.com/user-attachments/assets/86652912-0713-426c-a842-0366067c4225)
+   ![image](https://github.com/user-attachments/assets/9d185eb4-4080-4bad-8d41-f4ba3a670372)
 
-为了避免缓存穿透我们需要缓存预热将要查询的课程或商品信息的id提前存入布隆过滤器，添加数据时将信息的id也存入过滤器，当去查询一个数据时先在布隆过滤器中找一下如果没有到到就说明不存在，此时直接返回。
+   请求通过了参数校验后，查询数据库发现数据不存在。此时我们**仍然将这个 Key 存入 Redis 缓存，但 Value 设置为空字符串（或特殊标识）**。
+   *注意：为了防止占用过多内存或影响后续真实数据的写入，必须为这个空值缓存设置一个短暂的过期时间（TTL，如 2 分钟）。*
 
-3.缓存空值或特殊值（本项目应用）
+### 什么是缓存雪崩，怎么解决？
 
-![image](https://github.com/user-attachments/assets/9d185eb4-4080-4bad-8d41-f4ba3a670372)
-
-请求通过了第一步的校验，查询数据库得到的数据不存在，此时我们仍然去缓存数据，缓存一个空值或一个特殊值的数据。
-但是要注意：如果缓存了空值或特殊值要设置一个短暂的过期时间。
-
-**什么是缓存雪崩，怎么解决？**
 ![image](https://github.com/user-attachments/assets/758bf96d-af23-4d89-91de-71f96c001be6)
 
+**定义：** 缓存雪崩是指在同一时段，**缓存中大量的 Key 同时失效（或 Redis 服务宕机）**，导致大量高并发请求直接绕过缓存打到数据库，瞬间耗尽数据库资源，导致系统崩溃。
+常见原因：对一大批业务数据（如首页推荐商品）设置了完全相同的缓存过期时间。
 
- *定义：* 缓存雪崩是缓存中大量key失效后当高并发到来时导致大量请求到数据库，瞬间耗尽数据库资源，导致数据库无法使用。
+**解决方法：**
 
-造成缓存雪崩问题的原因是是大量key拥有了相同的过期时间，比如对课程信息设置缓存过期时间为10分钟，在大量请求同时查询大量的课程信息时，此时就会有大量的课程存在相同的过期时间，一旦失效将同时失效，造成雪崩问题。
+1. **对同一类型信息的 Key 设置不同的过期时间（常用）**
+   在原有固定过期时间的基础上，加上一个随机的过期时间值，使它们的失效时刻被打散，避免同时过期。
+   ```go
+   // Golang 示例：设置过期时间为 300秒 + (0~100)秒的随机值
+   expiration := time.Duration(300 + rand.Intn(100)) * time.Second
+   rdb.Set(ctx, "course:"+courseId, data, expiration
+   ```
+2. **使用互斥锁控制查询数据库的协程**
+当缓存失效时，通过锁机制（如 Go 的 sync.Mutex 或 Redis 分布式锁）控制，只允许一个 Goroutine 去查询数据库并重建缓存，其他 Goroutine 等待或重试。
 
-*解决方法：*
+3. **缓存预热与高可用**
+不用等到请求到来再去查询，提前由后台定时任务（Cron）将热点数据刷入缓存；同时搭建 Redis 哨兵或集群架构，防止 Redis 宕机引发的雪崩。
 
-1、使用同步锁控制查询数据库的线程
+### 什么是缓存击穿，怎么解决？
+定义： 缓存击穿是指某一个被高并发访问的热点数据（Hot Key），在缓存失效的瞬间，海量请求同时去查询数据库，导致数据库瞬间被单点压力击垮。
+常见场景：某爆款手机秒杀、微博热搜突发事件，当该热点数据的缓存刚好到期时。
 
-使用同步锁控制查询数据库的线程，只允许有一个线程去查询数据库，查询得到数据后存入缓存。
+解决方法：
 
-```java
-synchronized(obj){
-  //查询数据库
-  //存入缓存
-}
-```
+- 基于互斥锁解决（本项目实现方案之一）
 
-2、对同一类型信息的key设置不同的过期时间
+  - 思想：时间换空间。
 
-通常对一类信息的key设置的过期时间是相同的，这里可以在原有固定时间的基础上加上一个随机时间使它们的过期时间都不相同。
+  - 实现：使用 Redis 的 SETNX 指令（在 Go 中是 rdb.SetNX()）实现分布式互斥锁。缓存失效时，大量并发请求中只有一个 Goroutine 能成功获取锁去查 DB 并重建缓存，其余请求休眠等待后重试（需配合双重检查锁 DoubleCheck 保障性能）。
 
-```java
-   //设置过期时间300秒
-  redisTemplate.opsForValue().set("course:" + courseId, JSON.toJSONString(coursePublish),300+new Random().nextInt(100), TimeUnit.SECONDS);
-```
+  - 优缺点：内存占用小，能保证数据的强一致性；缺点是线程/协程需要等待，性能相对较低，若代码不严谨易引发死锁（必须设置锁的 TTL）。
 
-3、缓存预热
+- 基于逻辑过期方式（本项目实现方案之一）
 
-不用等到请求到来再去查询数据库存入缓存，可以提前将数据存入缓存。使用缓存预热机制通常有专门的后台程序去将数据库的数据同步到缓存。
+  - 思想：空间换时间。
 
-**什么是缓存击穿，怎么解决？**
+  - 实现：Redis 中的 Key 不设置物理过期时间（永不淘汰），而是在 Value 结构体中单独封装一个 ExpireTime 逻辑过期时间字段。每次查询时先判断逻辑时间是否已过期，如果过期了，当前 Goroutine 会先直接返回旧数据，同时**开启一个独立的后台协程（Goroutine）**去异步查 DB 并更新缓存。
 
-![image](https://github.com/user-attachments/assets/ae5f4706-29ac-4d18-9816-4f7f4e3660f1)
+  - 优缺点：响应性能极高，无阻塞等待；缺点是需要消耗额外内存封装时间字段，且在异步重建完成前，用户可能读到旧数据（短暂的数据不一致/脏读）。
 
+### 为什么逻辑过期方案中要开启协程 (Goroutine) 重建缓存？
+在使用“逻辑过期”解决缓存击穿时，发现数据逻辑过期后，开启后台协程（Goroutine）异步重建缓存的核心作用在于：提高系统的吞吐量与极致的响应速度，彻底剥离“用户请求”与“耗时 DB 查询”的耦合。
 
-*定义：* 缓存击穿是指大量并发访问同一个热点数据，当热点数据失效后同时去请求数据库，瞬间耗尽数据库资源，导致数据库无法使用。
-比如某手机新品发布，当缓存失效时有大量并发到来导致同时去访问数据库。
+具体优势分析：
 
-*解决方法：* 
+- 避免请求阻塞，提升响应速度。
+传统的同步阻塞更新：缓存失效时，用户请求必须等待几十到数百毫秒的 DB 查询，高并发下极易引发响应超时。
+异步重建：主协程发现数据过期后，立即向前端返回已有的“旧数据”（降级处理），耗时的 DB 查询和 Redis 写入交由后台 Goroutine 执行，用户体验如丝般顺滑。
 
-1.基于互斥锁解决
+- 削峰填谷，保护数据库。
+配合分布式锁，即便有 1 万个并发请求发现缓存逻辑过期，也只会放行 1个 Goroutine 成功拿到锁去后台执行 DB 重建任务。其余 9999 个请求获取锁失败后直接返回旧数据，完美拦截了对数据库的并发冲击。
 
-![image](https://github.com/user-attachments/assets/6c70bc97-3ebd-4b64-a43b-a2cf8c0564fb)
+- 消除并发场景下的锁竞争瓶颈。
+Go 语言的并发模型非常轻量，开启 Goroutine 成本极低。将重建任务交给单一的异步 Goroutine 后，彻底避免了多线程同步等待锁释放时的上下文切换和资源竞争开销，最大化利用了 CPU 性能。
 
+- 容错与稳定性提升。
+在极端高压场景下，即便后台协程查 DB 失败或发生 Panic，主业务逻辑依然能靠返回旧数据支撑基本盘，赋予了系统极强的“柔性可用”能力（容忍短暂的数据延迟更新，换取系统不宕机）。
 
-
-互斥锁（时间换空间）
-
-优点：内存占用小，一致性高，实现简单
-
-缺点：性能较低，容易出现死锁
-
-这里使用Redis中的setnx指令实现互斥锁，只有当值不存在时才能进行set操作
-
-锁的有效期更具体业务有关，需要灵活变动，一般锁的有效期是业务处理时长10~20倍
-
-线程获取锁后，还需要查询缓存（也就是所谓的双检），这样才能够真正有效保障缓存不被击穿
-
-2.基于逻辑过期方式
-
-![image](https://github.com/user-attachments/assets/a5e7ef0f-df12-4612-8ed9-fb622e5bfd70)
-
-逻辑过期（空间换时间）
-
-优点：性能高
-
-缺点：内存占用较大，容易出现脏读
-
-·注意：逻辑过期一定要先进行数据预热，将我们热点数据加载到缓存中
-
-适用场景
-
-商品详情页、排行榜等热点数据场景。
-
-数据更新频率低，但访问量大的场景。
-
-总结：两者相比较，互斥锁更加易于实现，但是容易发生死锁，且锁导致并行变成串行，导致系统性能下降，逻辑过期实现起来相较复杂，且需要耗费额外的内存，但是通过开启子线程重建缓存，使原来的同步阻塞变成异步，提高系统的响应速度，但是容易出现脏读
-
-**为什么重建子线程,作用是什么？**
-
-开启子线程重建缓存的作用在于提高系统的响应速度，避免因缓存击穿导致的数据库压力过大，同时保障系统在高并发场景下的稳定性，但开启子线程重建缓存可能引入数据不一致（脏读）问题
-
-具体原因：
-
-1. 提高系统响应速度
-
-同步阻塞的缺点： 在缓存失效时，传统方案通常会同步查询数据库更新缓存，这会导致用户请求被阻塞，特别是在高并发环境下可能出现大量线程等待，影响系统响应性能。
-
-子线程重建缓存的优势：
-
-主线程只需返回缓存中的旧数据，避免阻塞用户请求。
-重建缓存的任务交由后台线程执行，提高用户体验。
-
-2. 减少数据库压力
-
-缓存击穿问题： 当热点数据过期时，多个线程同时访问数据库，可能导致数据库压力骤增，甚至崩溃。
-
-子线程异步重建缓存：
-
-将数据库查询集中到一个后台线程中执行，避免多个线程同时查询数据库。
-即便在缓存击穿的情况下，也不会对数据库造成过大的负载。
-
-3. 提高系统吞吐量
-
-同步更新的瓶颈： 如果所有线程都等待缓存更新完成，系统吞吐量会因阻塞而降低。
-
-异步重建的优化：
-
-主线程可以快速返回旧数据，提升并发处理能力。
-
-数据更新操作与用户请求分离，减少了阻塞等待。
-
-4. 减少热点数据竞争
-
-高并发场景下的竞争： 热点数据被大量请求时，多个线程可能同时触发缓存更新逻辑，产生资源竞争。
-
-单子线程更新的效果：
-
-后台线程独占更新任务，避免多线程竞争更新缓存。
-
-配合分布式锁机制，可以有效减少竞争开销。
-
-5. 提升系统的稳定性
-
-数据库保护：
-
-异步更新缓存，减缓数据库的瞬时高并发压力。
-
-在极端情况下，即使缓存更新失败，系统仍能通过返回旧数据保持基本的服务能力。
-
-熔断机制结合：
-
-子线程的异步更新可以结合熔断、降级等机制，当更新任务失败时，系统可快速响应并记录失败日志以便后续处理。
-
-·适用场景
-
-热点数据： 商品详情页、排行榜等访问量极高的场景。
-
-高并发场景： 秒杀、抢购活动中，需要频繁访问热点数据。
-
-容忍短暂数据不一致的场景： 如排行榜数据的延迟更新对用户体验影响较小。
 
 ## 使用 Redis + Lua脚本实现对用户秒杀资格的预检，同时用乐观锁解决秒杀产生的超卖问题
 
-**为什么是要用Redis+Lua？**
 
-Redis执行一条命令的时候是具备原子性的，因为Redis执行命令是单线程的，不存在线程安全的问题，但当执行多条Redis命令时，就不是的了，我们把多条Redis指令放到Lua脚本中，Redis会把Lua脚本作为一个整体执行，保证了原子性，无需加锁，天然互斥。
+### 为什么高并发秒杀要用 Redis + Lua？
 
-我使用 Redis + Lua 实现秒杀资格预检，是因为它能在 **一次原子操作中完成库存判断、用户去重、扣减库存、记录订单、发消息**，避免了传统多命令方式的竞态条件。同时，Lua 脚本减少了网络开销，提升了性能，是高并发场景下的最佳实践。
+在极高并发的秒杀场景下，我们需要同时进行**查询库存、判断库存是否充足、校验用户是否重复下单、扣减库存、记录订单**等多个操作。如果将这些操作拆分成多条 Redis 命令与 Go 代码交互，在并发协程（Goroutine）环境下会产生严重的竞态条件（Race Condition），导致数据不一致。
 
-**说说这一套流程？**（就是`seckillVoucher`方法）
+**核心优势：**
+1. **原子性保障**：Redis 执行命令是单线程的，它会将整个 Lua 脚本作为一个整体放入队列中执行。在执行脚本期间，不会被其他客户端的命令打断，天然具备隔离性和原子性，**无需额外加分布式锁**。
+2. **减少网络开销**：将多个 Redis 操作封装在一个 Lua 脚本中，只需要一次网络请求即可完成“资格预检”的全套逻辑，大幅降低了网络 RTT（往返时延），极大提升了秒杀接口的吞吐量。
 
-先获取用户ID和订单ID，再将优惠券ID，用户ID和订单ID传给Lua脚本执行，进行资格预检，根据 Lua 脚本的返回值（0: 成功，1: 库存不足，2: 重复下单）返回对应的错误信息。将订单信息异步发送到 RabbitMQ 队列，由消费者处理后续逻辑，最后返回订单ID给前端。
+---
 
-**什么是超卖问题，怎么解决？**
+### 说说秒杀下单的整体流程？
+
+本项目采用了 **“Redis 预扣减 + MQ 异步解耦”** 的经典秒杀架构，将耗时的数据库操作异步化，极致提升接口响应速度。完整流程如下：
+
+1. **请求接收与 ID 生成**：Go 接入层接收请求，解析出用户 ID 和优惠券 ID，并通过 Redis 自研的全局唯一 ID 生成器（ID Worker）生成唯一的 `订单 ID`。
+2. **Lua 脚本资格预检**：将 `优惠券 ID`、`用户 ID`、`订单 ID` 作为参数传入 Lua 脚本在 Redis 中执行。脚本内部会原子性地完成：
+   - 判断库存是否大于 0。
+   - 利用 Redis 的 `Set` 结构判断当前用户 ID 是否已存在（防止重复刷单）。
+   - 若校验通过，则扣减 Redis 中的缓存库存，并将用户 ID 加入 `Set` 中。
+3. **响应前端**：Go 代码根据 Lua 脚本的返回值（`0`: 成功, `1`: 库存不足, `2`: 重复下单）快速做出判断。如果为 1 或 2，直接返回对应的错误信息；如果为 0，则预检成功。
+4. **异步投递与返回**：预检成功后，将包含订单详细信息的 Message 异步投递到 **Kafka** 消息队列中，随后立即将 `订单 ID` 返回给前端响应用户。
+5. **后台异步落库**：后台的 Kafka Consumer 独立协程持续监听队列，拉取到订单消息后，再从容地去执行 MySQL 数据库的扣减真实库存和创建订单表记录逻辑。
+
+---
+
+### 什么是超卖问题，怎么解决？
 
 ![image](https://github.com/user-attachments/assets/6136ae13-f7b9-43cc-9a2e-83e23d4d1e49)
 
-超卖问题：并发多线程问题，当线程1查询库存后，判断前，又有别的线程来查询，从而造成判断错误，超卖。
+**定义：**
+超卖问题是典型的高并发读写冲突问题。当优惠券仅剩最后 1 张时，由于并发执行，协程 A 查询库存发现剩余 1 张，在它还没来得及执行扣减操作时，协程 B 也来查询，同样发现剩余 1 张。最终两个协程都通过了校验并执行了扣减语句，导致库存变成负数，这就是超卖。
 
-解决方式：
+**常见的两种解决思路：**
 
-```
-悲观锁： 添加同步锁，让线程串行执行
-      优点：简单粗暴
-      缺点：性能一般
-```
+* **悲观锁（Pessimistic Lock）：**
+  * **思想**：添加强同步锁，让所有访问该资源的 Goroutine 排队串行执行。
+  * **优点**：简单粗暴，绝对保证数据安全。
+  * **缺点**：性能极差，并发能力断崖式下降。
+* **乐观锁（Optimistic Lock）：**
+  * **思想**：不加锁，允许多个协程并行执行，只在最后更新数据库的那一刻去判断数据有没有被其他协程修改过。
+  * **优点**：并发性能极佳，非常适合读多写少或短促高并发的场景。
+  * **缺点**：如果设计不当，可能导致高并发下大量请求更新失败（成功率低）。
 
-```
-乐观锁：不加锁，再更新时判断是否有其他线程在修改
+---
 
-      优点：性能好
-      缺点：存在成功率低的问题(该项目在超卖问题中，不在需要判断数据查询时前后是否一致，直接判读库存>0;有的项目里不是库存，只能判断数据有没有变化时，还可以用分段锁，将数据分到10个表，同时十个去抢)
-```
+### 说一下乐观锁和悲观锁的底层概念？
 
-**说一下乐观锁和悲观锁？**
+* **悲观锁**：总是假设最坏的情况，认为共享资源每次被访问时都会被修改。因此每次在读取或操作数据前都会先上锁（如 MySQL 的 `FOR UPDATE` 行锁，或 Golang 中的 `sync.Mutex`）。其他试图获取该资源的协程将被挂起阻塞，直到持有者释放锁。
+  * **适用场景**：多写场景，竞争极度激烈，且不允许重试的业务。
+* **乐观锁**：总是假设最好的情况，认为并发冲突概率很低，无需加锁也无需阻塞等待。只在提交更新修改时，去验证数据是否在此期间被修改过。通常利用**版本号机制（Version）** 或 **CAS（Compare-And-Swap）算法**来实现（参考 Golang 的 `sync/atomic` 包中的原子操作）。
+  * **适用场景**：多读少写，或期望系统维持高吞吐量的场景。
 
-悲观锁：悲观锁总是假设最坏的情况，认为共享资源每次被访问的时候就会出现问题(比如共享数据被修改)，所以每次在获取资源操作的时候都会上锁，这样其他线程想拿到这个资源就会阻塞直到锁被上一个持有者释放。也就是说，共享资源每次只给一个线程使用，其它线程阻塞，用完后再把资源转让给其它线程。
+---
 
-乐观锁:乐观锁总是假设最好的情况，认为共享资源每次被访问的时候不会出现问题，线程可以不停地执行，无需加锁也无需等待，只是在提交修改的时候去验证对应的资源（也就是数据）是否被其它线程修改了（具体方法可以使用版本号机制或 CAS 算法）。
+### 你在项目中具体使用的是哪种方式？
 
-悲观锁通常多用于写比较多的情况（多写场景，竞争激烈），这样可以避免频繁失败和重试影响性能，悲观锁的开销是固定的。不过，如果乐观锁解决了频繁失败和重试这个问题的话（比如LongAdder），也是可以考虑使用乐观锁的，要视实际情况而定。
+为了兼顾**高并发性能**与**防超卖绝对安全**，在 MySQL 异步落库时，我使用的是基于 **CAS 思想的变种乐观锁**。
 
-乐观锁通常多用于写比较少的情况（多读场景，竞争较少），这样可以避免频繁加锁影响性能。不过，乐观锁主要针对的对象是单个共享变量（参考java.util.concurrent.atomic包下面的原子变量类）。
-
-**你使用的什么？**
-
-使用的是乐观锁CAS算法。CAS是一个原子操作，底层依赖于一条CPU的原子指令。
-
-设计三个参数：
-
-- V:要更新的变量值
-- E：预期值
-- N：拟入的新值
-
-当且仅当V的值等于E时，CAS通过原子方式用新值N来更新V的值。如果不等，说明已经有其他线程更新了V，则当前线程放弃更新。
+纯粹的 CAS（比较并交换）包含三个操作数：内存位置（V）、预期原值（E）和新值（N）。只有当 V == E 时，才将 V 更新为 N。但在秒杀场景下，如果严格使用版本号或精准比对库存（例如 `WHERE stock = 100`），100 个并发请求只有 1 个能成功，其余 99 个全部失败，导致成功率极低（明明还有 99 个库存）。
 
 <img src="https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20250307150305076.png" alt="image-20250307150305076" style="zoom: 33%;" />
 
-从业务的角度看，只要库存数还有，就能执行这个操作，所以where条件设置为stock>0
+因此，我结合业务特性做出了优化：
+
+从业务的角度看，只要还有库存，就能执行扣减操作。所以我将 MySQL 的更新条件直接设计为 `WHERE stock > 0`。
+利用 MySQL InnoDB 引擎默认的**行级锁（Row Lock）** 特性，保证了这条 Update 语句在数据库层面的原子性，既避免了超卖，又彻底解决了传统 CAS 成功率低的问题。
 
 ![image-20250307150937348](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20250307150937348.png)
 
+
+
 ## 使用Redis分布式锁解决了在集群模式下一人一单的线程安全问题
 
-为了防止批量刷券，添加逻辑：根据优惠券id和用户id查询订单，如果不存在，则创建。
+### 为什么需要分布式锁？
 
-在集群模式下，加锁只是对该JVM给当前这台服务器的请求的加锁，而集群是多台服务器，所以要使用分布式锁，满足集群模式下多进程可见并且互斥的锁。
+在“秒杀”或“抢券”场景中，为了防止恶意用户利用并发漏洞批量刷券，我们的核心校验逻辑是：**根据“优惠券 ID”和“用户 ID”查询订单，如果不存在则创建。**
 
-**Redis分布式锁实现思路？**
-我使用的Redisson分布式锁，他能做到可重入，可重试
+在单机部署下，我们可以直接使用 Go 原生的 `sync.Mutex` 同步锁来保证并发安全。但是在**集群模式下**，原生的互斥锁只能控制当前这台服务器（单个 Go 进程）内的并发请求。对于多台服务器组成的集群，它们运行在不同的内存空间中，因此必须引入**分布式锁**，来实现集群范围内多进程可见且绝对互斥的锁机制。
 
-*可重入*:同一线程可以多次获取同一把锁，可以避免死锁，用hash结构存储。
+---
 
-​           大key是根据业务设置的，小key是线程唯一标识，value值是当前重入次数。
+### Redis 分布式锁实现思路
+
+为了彻底吃透分布式锁的底层原理，本项目**虽然依赖了第三方的分布式锁框架redsync**，但是利用 Go 协程 + Redis + 自定义 Lua 脚本，纯手写实现了一套具备一些高级特性的分布式锁。一个高级的锁应当支持以下特性，如Java 领域的 Redisson
+
+**1. 可重入性设计 (未实现)**
+同一个协程（Goroutine）在已经持有某把锁的情况下，可以再次获取该锁而不被阻塞。这有效避免了在复杂业务方法互相调用时发生死锁。
+* **底层实现**：抛弃了简单的 `String` 结构，改用 Redis 的 `Hash` 数据结构来存储锁状态。
+  * **大 Key**：锁的标识（如 `lock:order:1001`）。
+  * **小 Key (Field)**：当前获取锁的协程唯一标识（由 `UUID + GoroutineID` 拼接而成）。
+  * **Value**：当前的重入次数（`count`）。每次重入时数值 +1；释放锁时数值 -1，只有当 `count` 减到 0 时，才真正删除该大 Key 释放锁。
 
 <img src="https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20241205233234744.png" alt="image-20241205233234744" style="zoom: 50%;" />
 
-*可重试*：Redisson手动加锁，可以控制锁的失效时间和等待时间，当锁住的一个业务并没有执行完成的时候，Redisson会引入一个Watch Dog看门狗机制。就是说，每隔一段时间就检查当前事务是否还持有锁。如果持有，就增加锁的持有时间。当业务执行完成之后，需要使用释放锁就可以了。还有个好处就是，在`高并发`下，一个业务有可能会执行很快。客户1持有锁的时候，客户2来了以后并不会马上拒绝，他会自旋不断尝试获取锁。如果客户1释放之后，客户2可以立马持有锁，性能也能得到提升。
-
-
-
-
+**2. 可重试与看门狗机制 (已实现)**
+* **看门狗机制（自动续期）**：为了防止业务代码还没执行完，锁的有效期（TTL）就结束导致锁提前释放，我引入了类似 Redisson 的“看门狗”思想。加锁成功后，我会开启一个**独立的后台 Goroutine** 作为看门狗，它会每隔一段时间（如 TTL 的 1/3）利用 Lua 脚本去检查当前事务是否还持有锁。如果持有，就重新刷新锁的 TTL。业务执行完毕主动释放锁时，通过 Context 或 Channel 通知看门狗协程安全退出。
+* **可重试**：在加锁方法中，我设计了等待时间与自旋逻辑。当协程 2 发现锁被协程 1 占用时，不会立即报错拒绝，而是在给定的等待时间内通过定时器不断尝试获取锁。由于高并发下大多数业务执行极快，协程 1 释放锁后，协程 2 能立马抢占到锁，这极大提升了系统的并发处理性能。
 
 ![](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20250307153056365.png)
 
-*主从一致性*：连锁(multiLock)-不再有主从节点，都获取成功才能获取锁成功，有一个节点获取锁不成功就获取锁失败
-
-一个宕机了，还有两个节点存活，锁依旧有效，可用性随节点增多而增强。如果想让可用性更强，也可以给多个节点建立主从关系，做主从同步，但不会有主从一致问题，当新线程来新的主节点获取锁，由于另外两个主节点依然有锁，不会出现锁失效问题吗，所以不会获取成功。
+**3. 解决主从一致性问题 (未实现)**
+* **极端场景下的痛点**：在普通的 Redis 主从架构中，如果主节点刚写入锁就宕机了，且还没来得及同步给从节点，此时从节点被选举为新主节点，就会出现“锁丢失”。这就导致其他协程也能在新主节点上加锁成功，破坏了锁的互斥性。
+* **解决方案 (MultiLock)**：为了应对极高可用性要求，项目借鉴了 MultiLock（连锁）的思想。我们不再建立主从节点，而是部署多个**完全独立的 Redis 主节点**。加锁时，必须向所有独立节点发起加锁请求，只有当全部（或大多数）节点都获取锁成功，才算最终成功。哪怕其中一个节点宕机，由于另外几个存活的节点依然保留着锁信息，新来的请求必然无法获取成功，从而彻底杜绝了主从切换导致的锁失效问题。随着独立节点增多，锁的可用性和安全性也就越强。
 
 ![image-20250307153809096](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20250307153809096.png)
 
-[另一篇文章详细了解Redisson](https://kneegcyao.github.io/2024/12/05/Redisson/)
-
 ![image-20241207183707979](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20241207183707979.png)
 
-## 基于stream结构作为消息队列,实现异步秒杀下单
+## 基于 Kafka 消息队列实现异步秒杀下单
 
-**为什么用异步秒杀?**
+### 为什么用异步秒杀（引入消息队列的背景）?
 
-![image-20250307160040968](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20250307160040968.png)
+![image-20250307160040968](https://github.com/user-attachments/assets/30fdea5c-f0ef-46f8-ab6f-cbfd65e78072) 
 
-我们用jmeter测试，发现高并发下异常率高，吞吐量低，平均耗时高
+在传统的同步秒杀场景中，我们使用 Jmeter 进行高并发压测，往往会发现**异常率极高，吞吐量（QPS）极低，平均响应耗时很长**。
 
-整个业务流程是串行执行的，查询优惠券，查询订单，减库存，创建订单这四步都是走的数据库，mysql本身并发能力就较少，还有读写操作，还加了分布式锁，整个业务耗时长，并发能力弱。
+**痛点分析：** 同步请求的整个业务流程是串行执行的：`查询优惠券 -> 校验资格 -> 查订单防重复 -> 减库存 -> 创建订单`。
+这几步全都在直接操作 MySQL 数据库。MySQL 面对海量并发时的磁盘 I/O 瓶颈显而易见；再加上分布式锁的阻塞等待，导致大量 Goroutine 堆积，耗尽系统资源，最终系统崩溃。
 
-**怎么进行优化？**
+### 怎么进行优化？（核心思想：削峰填谷与异步解耦）
 
 ![image-20241207220614455](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20241207220614455.png)
 
-我们分成两个线程，我们将耗时较短的逻辑判断放到Redis中，例如：库存是否充足，是否一人一单这样的操作，只要满足这两条操作，那我们是一定可以下单成功的，不用等数据真的写进数据库，我们直接告诉用户下单成功就好了，将信息引入异步队列记录相关信息，然后后台再开一个线程，后台线程再去慢慢执行队列里的消息，这样我们就能很快的完成下单业务。
 
-![img](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/e342f782da8bd166aae355478e72fd06269fdcd127c7df90e342500ee9318476.jpg)
+我们将极度耗时的同步阻塞逻辑，拆分为**“极速前置校验”**和**“后台异步落库”**两个阶段：
 
-- 当用户下单之后，判断库存是否充足，只需要取Redis中根据key找对应的value是否大于0即可，如果不充足，则直接结束。如果充足，则在Redis中判断用户是否可以下单，如果set集合中没有该用户的下单数据，则可以下单，并将userId和优惠券存入到Redis中，并且返回0，整个过程需要保证是原子性的，所以我们要用Lua来操作，同时由于我们需要在Redis中查询优惠券信息，所以在我们新增秒杀优惠券的同时，需要将优惠券信息保存到Redis中
-- 完成以上逻辑判断时，我们只需要判断当前Redis中的返回值是否为0，如果是0，则表示可以下单，将信息保存到queue中去，然后返回，开一个线程来异步下单，其阿奴单可以通过返回订单的id来判断是否下单成功
+1. **极速前置校验（Redis + Lua）**：
+   当用户发起下单请求时，直接在 Redis 中通过 Lua 脚本原子性地判断“库存是否充足”以及“该用户是否已下单”。如果条件满足，直接在 Redis 里扣减缓存库存，并将用户 ID 加入已购买集合。
+2. **异步解耦（Kafka 消息队列）**：
+   Redis 校验通过后，我们立刻为用户生成 `订单ID`，并将包含了 `订单ID, 用户ID, 优惠券ID` 的消息投递到 **Kafka 消息队列**中，随后立刻向前端返回下单成功（响应耗时通常在个位数毫秒级）。
+3. **后台平滑落库（削峰填谷）**：
+   后台开启独立的 Goroutine 作为消费者，平缓地从 Kafka 中拉取排队的订单消息，从容地执行 MySQL 的“减库存、写订单”逻辑。即使前端有 10 万并发瞬间涌入，MySQL 侧也只会以自己能承受的速率（例如每秒 1000 个）去慢慢消费，彻底保护了数据库。
 
-**说说stream类型消息队列？**
+### 为什么选择 Kafka？
 
-使用的是消费者组模式（`Consumer Group`）
-
-- 消费者组(Consumer Group)：将多个消费者划分到一个组中，监听同一个队列，具备以下特点
-  1. 消息分流
-     - 队列中的消息会分留给组内的不同消费者，而不是重复消费者，从而加快消息处理的速度
-  2. 消息标识
-     - 消费者会维护一个标识，记录最后一个被处理的消息，哪怕消费者宕机重启，还会从标识之后读取消息，确保每一个消息都会被消费
-  3. 消息确认
-     - 消费者获取消息后，消息处于pending状态，并存入一个pending-list，当处理完成后，需要通过XACK来确认消息，标记消息为已处理，才会从pending-list中移除
-
-*基本语法：*
-
-- 创建消费者组
-
-  ```java
-  XGROUP CREATE key groupName ID [MKSTREAM]
-  ```
-
-  - key: 队列名称
-  - groupName: 消费者组名称
-  - ID: 起始ID标识，$代表队列中的最后一个消息，0代表队列中的第一个消息
-  - MKSTREAM: 队列不存在时自动创建队列
-
-- 删除指定的消费者组
-
-  ```bash
-  XGROUP DESTORY key groupName
-  ```
-
-- 给指定的消费者组添加消费者
-
-  ```bash
-  XGROUP CREATECONSUMER key groupName consumerName
-  ```
-
-- 删除消费者组中指定的消费者
-
-  ```bash
-  XGROUP DELCONSUMER key groupName consumerName
-  ```
-
-- 从消费者组中读取消息
-
-  ```bash
-  XREADGROUP GROUP group consumer [COUNT count] [BLOCK milliseconds] [NOACK] STREAMS key [keys ...] ID [ID ...]
-  ```
-
-  - group: 消费者组名称
-  - consumer: 消费者名，如果消费者不存在，会自动创建一个消费者
-  - count: 本次查询的最大数量
-  - BLOCK milliseconds: 当前没有消息时的最大等待时间
-  - NOACK: 无需手动ACK，获取到消息后自动确认（一般不用，我们都是手动确认）
-  - STREAMS key: 指定队列名称
-  - ID: 获取消息的起始ID
-    - `>`：从下一个未消费的消息开始(pending-list中)
-    - 其他：根据指定id从pending-list中获取已消费但未确认的消息，例如0，是从pending-list中的第一个消息开始
-
-
-
-*基本思路：*
-
-```java
-while(true){
-    // 尝试监听队列，使用阻塞模式，最大等待时长为2000ms
-    Object msg = redis.call("XREADGROUP GROUP g1 c1 COUNT 1 BLOCK 2000 STREAMS s1 >")
-    if(msg == null){
-        // 没监听到消息，重试
-        continue;
-    }
-    try{
-        //处理消息，完成后要手动确认ACK，ACK代码在handleMessage中编写
-        handleMessage(msg);
-    } catch(Exception e){
-        while(true){
-            //0表示从pending-list中的第一个消息开始，如果前面都ACK了，那么这里就不会监听到消息
-            Object msg = redis.call("XREADGROUP GROUP g1 c1 COUNT 1 STREAMS s1 0");
-            if(msg == null){
-                //null表示没有异常消息，所有消息均已确认，结束循环
-                break;
-            }
-            try{
-                //说明有异常消息，再次处理
-                handleMessage(msg);
-            } catch(Exception e){
-                //再次出现异常，记录日志，继续循环
-                log.error("..");
-                continue;
-            }
-        }
-    }
-}
-```
-**XREADGROUP命令的特点？**
-
-1. 消息可回溯
-2. 可以多消费者争抢消息，加快消费速度
-3. 可以阻塞读取
-4. 没有消息漏读风险
-5. 有消息确认机制，保证消息至少被消费一次
+相比于 Redis Stream 或 RabbitMQ，Kafka 在设计之初就是为了应对**超大规模的数据吞吐量**。它基于顺序磁盘 I/O 和零拷贝技术，单机可轻松支撑十万乃至百万级 TPS。在应对秒杀这种**瞬时流量洪峰**时，Kafka 的缓冲和堆积能力更加出色。
 
 ---
-**✅改进：** 使用RabbitMQ更适合。相关面试题可以看这个[相关文章](https://kneegcyao.github.io/posts/93c6a719.html);
 
-**1.在`application.yml`中配置RabbitMQ**
+### 怎么保证 MQ 消息不丢失？（可靠性问题）
 
-```yaml
-  spring:
-    rabbitmq:
-      host: localhost
-      port: 5672
-      username: guest
-      password: guest
-```
+在秒杀场景下，消息丢失意味着用户付了钱或抢到了名额，但数据库里没订单。为了保证消息的绝对可靠，我们需要从三个维度来保障：
 
-- **2. 声明队列和交换机**
-  - **正常队列和交换机的绑定：**
-     commonExchange ("Common") → 使用路由键 "CQ" 绑定到 queueC ("CQ")。
-  - **死信队列和交换机的绑定：**
-     deadLetterExchange ("Dead-letter") → 使用路由键 "DLQ" 绑定到 deadLetterQueueD ("DLQ")。
-  - **普通队列到死信交换机的关系（死信机制）：**
-     queueC ("CQ") 配置了：
-    - 死信交换机为 **Dead-letter**；
-    - 死信路由键为 **"DLQ"**；
-    - TTL 为 10 秒。
-  - 当 **queueC** 中的消息超过 TTL 或触发其它死信条件后，这些消息将被自动发送到 **deadLetterExchange**，再由 **deadLetterExchange** 根据 **"DLQ"** 路由键路由到 **deadLetterQueueD**。
+1. **生产者（Producer）发送不丢失**：
+   - 开启 Kafka 的 `acks=all` 机制，确保消息被写入所有 ISR（同步副本）后才返回成功。
+   - 增加本地重试机制。在投递失败时，利用 Go 协程进行一定次数的自旋重试。
+2. **消息队列（Broker）存储不丢失**：
+   - 为 Topic 设置多个 Partition，并配置多个副本（Replication Factor > 1）。即使某个 Broker 节点宕机，Follower 也能迅速切换为 Leader，保证数据不丢。
+3. **消费者（Consumer）消费不丢失**：
+   - **关闭自动提交 Offset（Auto Commit）**。
+   - 必须等待 Go 后台协程成功执行完 MySQL 的写入操作后，再**手动提交 Offset (Manual ACK)**。如果在写入数据库期间宕机，Offset 尚未提交，重启后消费者会再次拉取该消息重试。
 
-```java
-@Configuration
-public class QueueConfig {
+### 怎么防止消息被重复消费？（幂等性问题）
 
-    // 普通交换机名称
-    public static final String COMMON_EXCHANGE = "Common";
-    // 死信交换机名称
-    public static final String DEAD_DEAD_LETTER_EXCHANGE = "Dead-letter";
-    // 普通队列名称
-    public static final String QUEUE_C = "CQ";
-    // 死信队列名称
-    public static final String DEAD_LETTER_QUEUE_D = "DLQ";
+因为网络抖动或消费者宕机重试，不可避免地会出现同一条订单消息被拉取多次（At Least Once 语义）。我们需要保证消费逻辑的**幂等性**（即执行一次和执行一百次的结果是一样的）。
 
-    /**
-     * 声明普通交换机
-     * 
-     * @return DirectExchange
-     */
-    @Bean("commonExchange")
-    public DirectExchange commonExchange(){
-        return new DirectExchange(COMMON_EXCHANGE);
-    }
-
-    /**
-     * 声明死信交换机
-     * 
-     * @return DirectExchange
-     */
-    @Bean("deadLetterExchange")
-    public DirectExchange deadLetterExchange(){
-        return new DirectExchange(DEAD_DEAD_LETTER_EXCHANGE);
-    }
-
-    /**
-     * 声明普通队列C, 并绑定死信交换机及设置消息TTL
-     * 
-     * 设置说明：
-     * - x-dead-letter-exchange: 配置消息过期后转发的死信交换机名称
-     * - x-dead-letter-routing-key: 配置转发到死信交换机时使用的路由键，此处与死信队列绑定时的路由键一致（"DLQ"）
-     * - x-message-ttl: 消息存活时间（此处设置为10000毫秒，即10秒）
-     *
-     * @return Queue
-     */
-    @Bean("queueC")
-    public Queue queueC(){
-        HashMap<String, Object> arguments = new HashMap<>();
-        // 消息在队列中存活10秒后失效，进入死信队列
-        arguments.put("x-message-ttl", 10000);
-        // 配置死信交换机
-        arguments.put("x-dead-letter-exchange", DEAD_DEAD_LETTER_EXCHANGE);
-        // 配置死信路由键，绑定到死信队列时使用
-        arguments.put("x-dead-letter-routing-key", "DLQ");
-
-        return QueueBuilder.durable(QUEUE_C)
-                           .withArguments(arguments)
-                           .build();
-    }
-
-    /**
-     * 声明死信队列D
-     * 
-     * @return Queue
-     */
-    @Bean("deadLetterQueueD")
-    public Queue deadLetterQueueD(){
-        return QueueBuilder.durable(DEAD_LETTER_QUEUE_D)
-                           .build();
-    }
-
-    /**
-     * 普通队列C与普通交换机Common绑定
-     *
-     * 当消息发送到交换机Common，并使用路由键 "CQ" 时，
-     * 消息将被路由到队列CQ。
-     *
-     * @param queueC 普通队列
-     * @param commonExchange 普通交换机
-     * @return Binding
-     */
-    @Bean
-    public Binding bindingQueueCToCommonExchange(@Qualifier("queueC") Queue queueC,
-                                                 @Qualifier("commonExchange") DirectExchange commonExchange) {
-        return BindingBuilder.bind(queueC).to(commonExchange).with("CQ");
-    }
-
-    /**
-     * 死信队列D与死信交换机Dead-letter绑定
-     *
-     * 当普通队列CQ中的消息由于TTL过期或其他原因被转为死信后，
-     * 消息会转发到死信交换机Dead-letter，并使用路由键 "DLQ"，
-     * 从而被路由到死信队列DLQ。
-     *
-     * @param deadLetterQueueD 死信队列
-     * @param deadLetterExchange 死信交换机
-     * @return Binding
-     */
-    @Bean
-    public Binding bindingDeadLetterQueueDToDeadLetterExchange(@Qualifier("deadLetterQueueD") Queue deadLetterQueueD,
-                                                               @Qualifier("deadLetterExchange") DirectExchange deadLetterExchange) {
-        return BindingBuilder.bind(deadLetterQueueD).to(deadLetterExchange).with("DLQ");
-    }
-}
-
-```
-
-**3.发送者**
-
-```java
-       VoucherOrder order = new VoucherOrder();
-        order.setId(orderId);
-        order.setUserId(userId);
-        order.setVoucherId(voucherId);
-        // 你可以用 JSON，也可以用序列化
-        // 增加消息发送的异常处理
-        //放入mq
-        String jsonStr = JSONUtil.toJsonStr(order);
-        try {
-            rabbitTemplate.convertAndSend("Common","CQ",jsonStr );
-        } catch (Exception e) {
-            log.error("发送 RabbitMQ 消息失败，订单ID: {}", orderId, e);
-            throw new RuntimeException("发送消息失败");
-        }
-        // 3. 返回订单号给前端（实际下单异步处理）
-        return Result.ok(orderId);
-    }
-```
-
-**4.接受者**
-
-```java
-@Component
-@RequiredArgsConstructor
-@Slf4j
-public class SeckillVoucherListener {
-
-    @Resource
-    SeckillVoucherServiceImpl seckillVoucherService;
-    
-    @Resource
-    VoucherOrderServiceImpl voucherOrderService;
-
-    /**
-     * 普通队列消费者：监听队列 "CQ"
-     *
-     * 消息从普通队列 "CQ" 进入后进行转换处理，保存订单，同时数据库秒杀库存减一
-     *
-     * @param message RabbitMQ消息
-     * @param channel 消息通道
-     * @throws Exception 异常处理
-     */
-    @RabbitListener(queues = "CQ")
-    public void receivedC(Message message, Channel channel) throws Exception {
-        String msg = new String(message.getBody());
-        log.info("普通队列:");
-        VoucherOrder voucherOrder = JSONUtil.toBean(msg, VoucherOrder.class);
-        log.info(voucherOrder.toString());
-        voucherOrderService.save(voucherOrder);  // 保存订单到数据库
-
-        // 秒杀业务：库存减一操作
-        Long voucherId = voucherOrder.getVoucherId();
-        seckillVoucherService.update()
-                .setSql("stock = stock - 1") // set stock = stock - 1
-                .eq("voucher_id", voucherId)
-                .gt("stock", 0)             // where voucher_id = ? and stock > 0
-                .update();
-    }
-
-    /**
-     * 死信队列消费者：监听队列 "DLQ"
-     *
-     * 消息从死信队列 "DLQ" 进入后进行相同的处理，
-     * 适用于消息因过期或其它原因进入死信队列时的处理逻辑
-     *
-     * @param message RabbitMQ消息
-     * @throws Exception 异常处理
-     */
-    @RabbitListener(queues = "DLQ")
-    public void receivedDLQ(Message message) throws Exception {
-        log.info("死信队列:");
-        String msg = new String(message.getBody());
-        VoucherOrder voucherOrder = JSONUtil.toBean(msg, VoucherOrder.class);
-        log.info(voucherOrder.toString());
-        voucherOrderService.save(voucherOrder);  // 保存订单到数据库
-
-        // 秒杀业务：库存减一操作
-        Long voucherId = voucherOrder.getVoucherId();
-        seckillVoucherService.update()
-                .setSql("stock = stock - 1") // set stock = stock - 1
-                .eq("voucher_id", voucherId)
-                .gt("stock", 0)             // where voucher_id = ? and stock > 0
-                .update();
-    }
-}
-
-```
----
-
-
-## 使用Redis的 ZSet 数据结构实现了点赞排行榜功能,使用Set 集合实现关注、共同关注功能
-
-**什么是ZSet?**
-
-Zset，即有序集合（Sorted Set），是 Redis 提供的一种复杂数据类型。Zset 是 set 的升级版，它在 set 的基础上增加了一个权重参数 score，使得集合中的元素能够按 score 进行有序排列。
-
-在 Zset 中，集合元素的添加、删除和查找的时间复杂度都是 O(1)。这得益于 Redis 使用的是一种叫做跳跃列表（skiplist）的数据结构来实现 Zset。
-
-**为什么使用ZSet数据结构？**
-
-一人只能点一次赞，对于点赞这种高频变化的数据，如果我们使用MySQL是十分不理智的，因为MySQL慢、并且并发请求MySQL会影响其它重要业务，容易影响整个系统的性能，继而降低了用户体验。
-
-![image-20241208154509134](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20241208154509134.png)
-
-Zset 的主要特性包括：
-
-1.  唯一性：和 set 类型一样，Zset 中的元素也是唯一的，也就是说，同一个元素在同一个 Zset 中只能出现一次。 
-2.  排序：Zset 中的元素是有序的，它们按照 score 的值从小到大排列。如果多个元素有相同的 score，那么它们会按照字典序进行排序。 
-3.  自动更新排序：当你修改 Zset 中的元素的 score 值时，元素的位置会自动按新的 score 值进行调整。
-
-
-
-**点赞**
-
-用ZSet中的add方法增添，时间戳作为score（zadd key value score)
-
-用ZSet中的score方法，来判断是否存在
-
-```java
- @Override
-    public Result updateLike(Long id){
-        //1.获取当前用户
-        Long userId = UserHolder.getUser().getId();
-        //2.判断当前用户有没有点赞
-        String key=BLOG_LIKED_KEY+id;
-        Double score = stringRedisTemplate.opsForZSet().score(key, userId.toString());
-        if(score==null) {
-            //3.如果未点赞，可以点赞
-            //3.1.数据库点赞数+1
-            boolean isSuccess = update().setSql("liked=liked+1").eq("id", id).update();
-            //3.2.保存用户到redis的set集合  zadd key value score
-            if(isSuccess){
-                stringRedisTemplate.opsForZSet().add(key,userId.toString(),System.currentTimeMillis());
-            }
-        }else {
-            //4.如果已经点赞，取消点赞
-            //4.1.数据库点赞数-1
-            boolean isSuccess = update().setSql("liked=liked-1").eq("id", id).update();
-            if(isSuccess) {
-                //4.2.将用户从set集合中移除
-                stringRedisTemplate.opsForZSet().remove(key,userId.toString());
-            }
-        }
-        return Result.ok();
-    }
-```
-
-**共同关注**
-
-通过Set中的intersect方法求两个key的交集
-
-```java
- @Override
-    public Result follow(Long followUserId, Boolean isFollow) {
-        //获取登录用户
-        Long userId = UserHolder.getUser().getId();
-        String key = "follows:" + userId;
-        //1.判断关注还是取关
-        if(isFollow) {
-            //2.关注
-            Follow follow = new Follow();
-            follow.setFollowUserId(followUserId);
-            follow.setUserId(userId);
-            boolean isSuccess = save(follow);
-            if(isSuccess){
-                //把关注用户的id，放入redis的set集合 sadd userId followUserId
-                stringRedisTemplate.opsForSet().add(key,followUserId.toString());
-            }
-        }else {
-            //3.取关
-            boolean isSuccess = remove(new QueryWrapper<Follow>()
-                    .eq("user_id", userId)
-                    .eq("follow_user_id", followUserId));
-            //移除
-            if(isSuccess){
-                stringRedisTemplate.opsForSet().remove(key,followUserId.toString());
-            }
-        }
-        return Result.ok();
-    }
-
-```
-
-
-
-```java
-@Override
-    public Result followCommons(Long id) {
-        //获取当前用户
-        Long userId = UserHolder.getUser().getId();
-        String key = "follows:" + userId;
-        //求交集
-        String key2 = "follows:" + id;
-        Set<String> intersect = stringRedisTemplate.opsForSet().intersect(key, key2);
-        if(intersect==null||intersect.isEmpty()){
-            return Result.ok(Collections.emptyList());
-        }
-        //解析出id
-        List<Long> ids = intersect.stream().map(Long::valueOf).collect(Collectors.toList());
-
-        //查询用户
-        List<UserDTO> userDTOS = userService
-                .listByIds(ids).stream()
-                .map(user -> BeanUtil.copyProperties(user, UserDTO.class))
-                .collect(Collectors.toList());
-
-        return Result.ok(userDTOS);
-
-    }
-```
-## 附近商铺搜索
-
-我使用的是Redis的GEO数据结构，来存储商户地理座标
-
-**GEO数据结构简介**
-
-- **Redis GEO本质**：底层基于**Sorted Set（有序集合）**实现，存储每个位置的经纬度信息，并支持快速范围查询。
-- **核心能力**：
-  - **添加位置**：存储商户ID及其经纬度。
-  - **计算距离**：获取两个位置间的距离。
-  - **范围搜索**：查找某中心点半径范围内的所有商户。
-  - **排序**：按距离升序或降序返回结果。
-
-**基本操作**
-
-**1. GEOADD：添加地理位置**
-
-**作用**：将经纬度与成员（如商户ID）关联，存储到GEO集合中。
-**语法**：
-
-```bash
-GEOADD key 经度1 纬度1 成员1 [经度2 纬度2 成员2 ...]
-```
-
-```bash
-GEOADD shops:geo 116.397128 39.916527 "shop:1001" 116.405285 39.904987 "shop:1002"
-```
-
-**说明**：
-
-- 经纬度范围为：经度（-180 到 180），纬度（-85.05112878 到 85.05112878）。
-- 若成员已存在，会更新其经纬度。
-- 返回值为成功添加的成员数量（忽略重复成员的更新）。
+**本项目的解决方案：**
+1. **数据库唯一索引（兜底方案）**：
+   在 MySQL 的 `voucher_order` 订单表中，通常将 `订单ID` 设置为主键，或者对 `(user_id, voucher_id)` 设置唯一索引（针对一人一单场景）。即使消息重复消费，第二次 `INSERT` 时会直接报唯一键冲突异常，直接 catch 掉该异常即可，不会产生脏数据。
+2. **乐观锁（CAS）防止重复扣减**：
+   更新库存时，我们使用 `UPDATE tb_voucher SET stock = stock - 1 WHERE id = ? AND stock > 0`。配合行锁，哪怕重复消息试图再次执行扣减，只要库存为 0 就会安全失败。
 
 ---
 
-**2. GEOPOS：获取成员坐标**
+### 项目中 Kafka 的生产与消费实现机制（Go 代码示例）
 
-**作用**：查询指定成员的经纬度。
-**语法**：
+利用 Go 的协程轻量化特性，我们可以非常优雅地实现消息的投递与异步监听。
 
-```bash
-GEOPOS key 成员1 [成员2 ...]
-```
-
-**示例**：
-
-```bash
-GEOPOS shops:geo "shop:1001"
-```
-
-**输出**：
-
-```bash
-1) 1) "116.39712721109390259"    # 经度
-   2) "39.91652652951830512"     # 纬度
-```
-
-**说明**：
-
-- 若成员不存在，返回`nil`。
-- 返回值为数组格式，顺序与查询成员一致。
-
----
-
-**3. GEODIST：计算两个成员间的距离**
-
-**作用**：返回两个地理位置之间的距离。
-**语法**：
-
-```bash
-GEODIST key 成员1 成员2 [单位]
-```
-
-**单位参数**：
-
-- `m`（米，默认）、`km`（千米）、`mi`（英里）、`ft`（英尺）。
-
-  **示例**：
-
-```bash
-GEODIST shops:geo "shop:1001" "shop:1002" km
-```
-
-**输出**：
-
-```bash
-"1.6423"  # 单位：千米
-```
-
-**说明**：
-
-- 若任一成员不存在，返回`nil`。
-- 使用Haversine公式计算球面距离，误差<0.5%。
-
----
-
-**4. GEORADIUS：根据中心点搜索半径内的成员**
-
-**作用**：以指定经纬度为中心，搜索半径范围内的成员。
-**语法**：
-
-```bash
-GEORADIUS key 经度 纬度 半径 单位 [WITHDIST] [WITHCOORD] [ASC|DESC] [COUNT 数量]
-```
-
-**参数说明**：
-
-- `WITHDIST`：返回成员与中心点的距离。
-- `WITHCOORD`：返回成员的经纬度。
-- `ASC/DESC`：按距离升序/降序排序（默认升序）。
-- `COUNT`：限制返回结果数量。
-  **示例**：
-
-```bash
-GEORADIUS shops:geo 116.403847 39.915526 5 km WITHDIST ASC COUNT 10
-```
-
-**输出**：
-
-```bash
-1) 1) "shop:1001"             # 成员
-   2) "0.8521"                # 距离（单位：km）
-2) 1) "shop:1002"
-   2) "1.6423"
-```
-
----
-
-**5. GEORADIUSBYMEMBER：根据成员位置搜索**
-
-**作用**：以某个成员的位置为中心，搜索半径范围内的其他成员。
-**语法**：
-
-```bash
-GEORADIUSBYMEMBER key 成员 半径 单位 [WITHDIST] [WITHCOORD] [ASC|DESC] [COUNT 数量]
-```
-
-**示例**：
-
-```bash
-GEORADIUSBYMEMBER shops:geo "shop:1001" 2 km WITHCOORD
-```
-
-**输出**：
-
-```bash
-1) 1) "shop:1001"             
-   2) "0.0000"                # 距离（自身）
-   3) 1) "116.39712721109390259" 
-      2) "39.91652652951830512"
-```
-
-
-
-## 用户签到
-
-基于Redis中的BitMap数据结构实现。
-
-- **BitMap概念**
-
-`Bitmap`，即位图，是一串连续的二进制数组（0和1），可以通过偏移量（offset）定位元素。BitMap通过最小的单位bit来进行`0|1`的设置，表示某个元素的值或者状态，时间复杂度为O(1)。我们将签到记录为1，为签到记录为0。
-
-由于 bit 是计算机中最小的单位，使用它进行储存将非常节省空间，特别适合一些数据量大且使用**二值统计的场景**。
-
-`Bitmap` 本身是用 `String` 类型作为底层数据结构实现的一种统计二值状态的数据类型。
-
-`String` 类型是会保存为二进制的字节数组，所以，Redis 就把字节数组的每个 bit 位利用起来，用来表示一个元素的二值状态，你可以把 `Bitmap` 看作是一个 bit 数组。
-
-<img src="https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/090cfd4226873a079b3c43d97eec8e69.png" alt="redis中bitmap的使用及场景，如何操作_redis bitmap-CSDN博客" style="zoom:50%;" />
-
-----
-
-- **基本命令**
-
- **设置标记**
-
-即 setbit ，主要是指将某个索引，设置为1(设置0表示抹去标记)
-
-```java
-@Autowired
-private StringRedisTemplate redisTemplate;
-
-/**
- * 设置标记位
- *
- * @param key
- * @param offset
- * @param tag
- * @return
- */
-public Boolean mark(String key, long offset, boolean tag) {
-    return redisTemplate.opsForValue().setBit(key, offset, tag);
+**1. 生产者（接入层，极速响应）**
+```go
+// 封装订单消息
+orderMsg := VoucherOrderMessage{
+    Id:        orderId,
+    UserId:    userId,
+    VoucherId: voucherId,
 }
+jsonBytes, _ := json.Marshal(orderMsg)
+
+// 异步发送到 Kafka (seckill_topic)
+err := global.KafkaWriter.WriteMessages(ctx, kafka.Message{
+    Key:   []byte(strconv.FormatInt(userId, 10)), // 根据用户ID做 hash 保证发往同一分区
+    Value: jsonBytes,
+})
+if err != nil {
+    log.Error("发送 Kafka 消息失败，订单ID: %d", orderId)
+    return Result.Fail("抢购失败，系统繁忙")
 }
+
+// 消息发送成功，立刻返回前端订单号
+return Result.Ok(orderId)
 ```
+**2. 消费者（后台长期运行的监听协程）**
 
- **判断存在与否**
+```go
+// 启动服务时，在 main 或者初始化环节启动消费者 Goroutine
+func StartSeckillConsumer() {
+    go func() {
+        for {
+            // 阻塞等待拉取消息
+            m, err := global.KafkaReader.ReadMessage(context.Background())
+            if err != nil {
+                log.Error("拉取 Kafka 消息失败: %v", err)
+                continue
+            }
 
-即 getbit key index ，如果返回1，表示存在否则不存在
+            // 解析消息
+            var order VoucherOrderMessage
+            json.Unmarshal(m.Value, &order)
 
-```java
-/**
- * 判断是否标记过
- *
- * @param key
- * @param offest
- * @return
- */
-public Boolean container(String key, long offest) {
-    return redisTemplate.opsForValue().getBit(key, offest);
-}
-```
-
-**计数**
-
-即 bitcount key ，统计和
-
-```java
-/**
- * 统计计数
- *
- * @param key
- * @return
- */
-public long bitCount(String key) {
-    return redisTemplate.execute(new RedisCallback<Long>() {
-        @Override
-        public Long doInRedis(RedisConnection redisConnection) throws DataAccessException {
-            return redisConnection.bitCount(key.getBytes());
-        }
-    });
-}
-```
-
-项目中我创建了一个记录签到的表，实现签到接口，将当前用户当天签到信息保存到Redis中
-
-![image-20250418171823965](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20250418171823965.png)
-
-```java
-/**
- * 用户签到
- *
- * @return
- */
-public Result sign() {
-    // 1. 获取当前登录用户的ID（从ThreadLocal中获取用户信息，确保线程安全）
-    Long userId = ThreadLocalUtls.getUser().getId();
-    
-    // 2. 获取当前日期时间（使用系统默认时区）
-    LocalDateTime now = LocalDateTime.now();
-    
-    // 3. 拼接Redis键名：格式为 "sign:用户ID:年月"
-    //   示例：用户1001在2023年10月签到 → "sign:1001:202310"
-    String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
-    String key = USER_SIGN_KEY + userId + keySuffix;
-    
-    // 4. 获取今天是本月的第几天（范围1~31）
-    int dayOfMonth = now.getDayOfMonth();
-    
-    // 5. 使用Redis位图记录签到（偏移量从0开始，故需-1）
-    stringRedisTemplate.opsForValue().setBit(key, dayOfMonth - 1, true);
-    
-    // 6. 返回操作成功结果
-    return Result.ok();
-}
-```
-
-```java
-/**
- * 记录连续签到的天数
- *
- * @return
- */
-@Override
-public Result signCount() {
-    // 1、获取签到记录
-    // 获取当前登录用户
-    Long userId = ThreadLocalUtls.getUser().getId();
-    // 获取日期
-    LocalDateTime now = LocalDateTime.now();
-    // 拼接key
-    String keySuffix = now.format(DateTimeFormatter.ofPattern(":yyyyMM"));
-    String key = USER_SIGN_KEY + userId + keySuffix;
-    // 获取今天是本月的第几天
-    int dayOfMonth = now.getDayOfMonth();
-    // 获取本月截止今天为止的所有的签到记录，返回的是一个十进制的数字 BITFIELD sign:5:202203 GET u14 0
-    List<Long> result = stringRedisTemplate.opsForValue().bitField(
-            key,
-            BitFieldSubCommands.create()
-                    .get(BitFieldSubCommands.BitFieldType.unsigned(dayOfMonth)).valueAt(0)
-    );
-    // 2、判断签到记录是否存在
-    if (result == null || result.isEmpty()) {
-        // 没有任何签到结果
-        return Result.ok(0);
-    }
-    // 3、获取本月的签到数（List<Long>是因为BitFieldSubCommands是一个子命令，可能存在多个返回结果，这里我们知识使用了Get，
-    // 可以明确只有一个返回结果，即为本月的签到数，所以这里就可以直接通过get(0)来获取）
-    Long num = result.get(0);
-    if (num == null || num == 0) {
-        // 二次判断签到结果是否存在，让代码更加健壮
-        return Result.ok(0);
-    }
-    // 4、循环遍历，获取连续签到的天数（从当前天起始）
-    int count = 0;
-    while (true) {
-        // 让这个数字与1做与运算，得到数字的最后一个bit位，并且判断这个bit位是否为0
-        if ((num & 1) == 0) {
-            // 如果为0，说明未签到，结束
-            break;
-        } else {
-            // 如果不为0，说明已签到，计数器+1
-            count++;
-        }
-        // 把数字右移一位，抛弃最后一个bit位，继续下一个bit位
-        num >>>= 1;
-    }
-    return Result.ok(count);
-}
-```
-
-
-
-## UV统计
-
-UV统计（Unique Visitor Statistics）是用于衡量网站、应用程序或其他在线服务中独立访客数量的关键指标。以下是关于UV统计的详细解析：
-
-**1. UV的定义**
-
-- **核心概念**：UV（Unique Visitor，独立访客）指在一定时间范围内（通常为一天），访问某网站或页面的不同用户数量。同一用户多次访问仅计为1次124。
-- **与PV的区别**：
-  - **PV（Page View，页面浏览量）**：统计用户每次访问页面的次数，多次刷新页面会累加14。
-  - **UV更关注用户身份的唯一性**，而PV反映页面热度
-
-**2.实现方法**
-
-使用**HyperLogLog(HLL)**数据结构
-
-- **原理**：基于概率算法，通过哈希函数估算集合基数（即唯一元素数量），无需存储完整用户数据，极大节省内存。
-- **Redis实现**：
-  - **内存占用**：单个HLL结构仅需≤16KB，误差率<0.81%，适合高并发场景。
-  - **命令示例**：
-    - `PFADD key user_id`：添加用户到HLL。
-    - `PFCOUNT key`：获取UV估算值
-
-**模拟用户数据**
-
-```java
-    /**
-     * 测试 HyperLogLog 实现 UV 统计的误差
-     */
-    @Test
-    public void testHyperLogLog() {
-        String[] values = new String[1000];
-        // 批量保存100w条用户记录，每一批1个记录
-        int j = 0;
-        for (int i = 0; i < 1000000; i++) {
-            j = i % 1000;
-            values[j] = "user_" + i;
-            if (j == 999) {
-                // 发送到Redis
-                stringRedisTemplate.opsForHyperLogLog().add("hl2", values);
+            // 执行耗时的数据库真实落库操作
+            err = handleVoucherOrder(order)
+            
+            // 只有当数据库更新成功，才手动 Commit（防止消息丢失）
+            if err == nil {
+                global.KafkaReader.CommitMessages(context.Background(), m)
+            } else {
+                log.Error("落库失败，将进行重试: %v", err)
             }
         }
-        // 统计数量
-        Long count = stringRedisTemplate.opsForHyperLogLog().size("hl2");
-        System.out.println("count = " + count);
-    }
-
+    }()
+}
 ```
+## 社交功能：点赞、关注与共同关注
+
+### 1. 为什么使用 ZSet 实现点赞？
+对于高频变化的“点赞”数据，如果直接操作 MySQL 会引发严重的性能瓶颈。
+我们需要一个能保证 **“一人只能点赞一次”**，且能 **“按点赞时间排序”**（用于展示点赞列表）的数据结构。
+* **Redis ZSet (有序集合)** 完美契合：它具有 Set 的去重唯一性，同时自带一个 `score` 权重参数。
+* **实现逻辑**：将点赞时间戳作为 `score`，用户 ID 作为 `member`。
+  * **点赞/取消点赞**：利用 `rdb.ZScore()` 判断是否已点赞。未点赞则 `rdb.ZAdd()` 并更新 DB；已点赞则 `rdb.ZRem()` 取消。
+  * **点赞列表展示**：利用 `ZRange` / `ZRevRange` 即可按时间顺序轻松查出前 N 名点赞用户。
+
+### 2. 使用 Set 实现关注与共同关注
+* **关注与取关**：使用 Redis 的 Set 集合存储某个用户的关注列表。关注即 `SADD follows:userID followUserID`，取关即 `SREM`。
+* **共同关注**：利用 Set 的天然数学交集特性，直接使用 `SINTER follows:userA follows:userB` 命令，即可在 Redis 内存中极速求出两个用户的共同关注列表，完美避开复杂的 SQL 多表关联查询。
+
+---
+
+## 附近商铺搜索 (GEO)
+
+在“附近商铺”功能中，由于需要计算两点之间的球面距离并进行半径范围筛选，传统数据库难以高效支撑。本项目采用 Redis 的 **GEO** 数据结构实现。
+
+### GEO 核心原理与操作
+* **底层实现**：GEO 的底层实际上是由 **ZSet** 实现的。Redis 通过 GeoHash 算法将二维的经纬度坐标映射为一维的整数值，作为 ZSet 的 `score` 进行存储和排序。
+* **核心命令 (配合 go-redis)**：
+  * **录入商户位置**：`GEOADD` (Go: `rdb.GeoAdd`)，将商户 ID 和经纬度存入缓存。
+  * **附近搜索**：在早期的 Redis 中常用 `GEORADIUS`，但在较新版本中推荐使用功能更强大的 `GEOSEARCH` (Go: `rdb.GeoSearch`)。我们以用户的经纬度为中心，指定半径（如 5km），即可快速返回范围内的商铺 ID 列表及其距离，并支持按距离升序排列。
+
+---
+
+## 用户签到与连续签到统计 (BitMap)
+
+### 为什么使用 BitMap？
+签到本质上只有两个状态：“已签到(1)”和“未签到(0)”。如果使用普通的数据库表或 Key-Value 存储，每个用户的每次签到都会产生一条记录，当用户基数庞大时，会消耗海量存储空间。
+* **极致的空间压缩**：`BitMap`（位图）底层是 String（字节数组）。我们可以按位（bit）来存数据。一个月最多 31 天，一个用户一个月的签到记录**连 4 个字节（32 bit）都不到**。100 万用户一个月的签到数据仅仅占用约 4MB 内存！
+
+### 核心实现思路
+1. **签到**：以 `sign:userID:年月` 为 Key，将今天是本月的第几天作为 `offset` 偏移量。执行 `SETBIT key offset 1` (Go: `rdb.SetBit()`)。
+2. **查询连续签到天数**：
+   * 难点在于如何快速获知“从今天起往前连续签到了几天”。
+   * 利用 `BITFIELD` 命令 (Go: `rdb.BitField()`) 一次性取出从本月第 1 天到今天的所有 bit 数据，它会返回一个十进制整数。
+   * **位运算统计**：在 Go 代码中，通过循环对该整数进行 `按位与 1 (num & 1)` 的操作。若结果为 1，则连续签到天数 `+1`，随后将数字 `右移 1 位 (num >>= 1)` 继续判断，直到遇到 0 为止，极大提升了运算效率。
+
+---
+
+## UV 统计 (HyperLogLog)
+
+### UV 与 PV 的痛点
+* **PV (页面浏览量)**：可以直接用 Redis 的 `INCR` 计数。
+* **UV (独立访客)**：需要去重。如果用 Set 或 BitMap 存储一天的所有独立用户 ID，当 UV 达到千万级别时，单 Key 的内存占用会非常恐怖（大 Key 问题）。
+
+### HyperLogLog 解决方案
+本项目使用 Redis 的 **HyperLogLog (HLL)** 数据结构来处理 UV 统计。
+* **核心优势**：基于概率估算算法，无论统计多少个不同的元素，单个 HLL 结构的内存占用**永远固定在最大 12KB 左右**！虽然有约 0.81% 的标准误差，但在宏观流量统计场景下完全可以忽略不计。
+* **极简调用**：
+  * **添加访客**：`PFADD key userID` (Go: `rdb.PFAdd()`)
+  * **获取 UV 数**：`PFCOUNT key` (Go: `rdb.PFCount()`)
 
