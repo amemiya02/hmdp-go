@@ -1,5 +1,13 @@
 # HMDP-Go
 
+## 目录
+
+- [项目概览](#项目概览)
+- [技术栈](#技术栈)
+- [Quick Start](#quick-start)
+- [架构亮点与核心技术选型](#架构亮点与核心技术选型)
+- [亮点难点](#亮点难点)
+
 ## 项目概览
 
 本项目是基于 Go 语言生态对经典 O2O 社交与营销平台（[原黑马点评](https://www.bilibili.com/video/BV1NV411u7GE/)）的深度重构与架构升级。项目模拟了类似大众点评的核心业务场景，完成了从用户鉴权、商户查询、社交探店、到高并发秒杀抢券的完整业务闭环。
@@ -10,8 +18,7 @@
 
 ## 技术栈
 
-
-- Go 1.25
+- Go 1.25.6
 - Gin
 - GORM
 - MySQL
@@ -19,33 +26,131 @@
 - Lua
 - Kafka
 
+## Quick Start
+
+本节目标：让你在本地最短路径跑起来后端服务。
+
+### 1. 前置依赖
+
+- Go: `>= 1.25.6`
+- MySQL: `8.x`
+- Redis: `6.x/7.x`
+- Kafka: `3.x`（或兼容发行版）
+- 黑马点评前端：用原项目的`nginx-1.18.0.zip`即可，解压后直接运行`nginx.exe`。
+
+### 2. 拉取依赖
+
+```bash
+go mod tidy
+```
+
+### 3. 准备数据库与中间件
+
+确保以下地址可访问（默认与 `config/config.yaml` 一致）：
+
+- MySQL: `127.0.0.1:3306`
+- Redis: `127.0.0.1:6379`
+- Kafka: `127.0.0.1:9092`
+
+并提前创建数据库与 Topic：
+
+- MySQL 数据库：`hmdp`，建表脚本`hmdp.sql`已提供。
+- Kafka Topic：`voucher-order-topic`
+
+### 4. 修改配置
+
+编辑 `config/config.yaml`，重点检查以下字段：
+
+- `mysql.username`
+- `mysql.password`
+- `mysql.dbname`
+- `redis.host` / `redis.port`
+- `kafka.brokers`
+- `kafka.topic`
+- `server.port`
+
+### 5. 启动服务
+
+```bash
+go run ./cmd/api/main.go
+```
+
+启动成功后默认监听：`http://localhost:8081`
+
+### 6. 快速验证
+
+可先调用一个无需登录的接口确认服务可用：
+
+```bash
+curl http://localhost:8081/shop-type/list
+```
+
+### 7. 运行测试（可选）
+
+```bash
+go test ./...
+```
+
+### 常见问题
+
+- Redis 连接失败：检查 `redis.host + redis.port` 是否可达（端口字段是 `:6379` 这种格式）。
+- Kafka 无法消费：确认 `group_id`、`topic` 与 broker 地址一致，且 broker 对外地址可被本机访问。
+- MySQL 认证失败：检查账号密码、数据库名与字符集配置。
+
+## 面试口径校对（与当前代码一致）
+
+这部分建议你在面试前先过一遍，避免“文档说法”和“代码实现”不一致导致追问翻车。
+
+| 主题 | 当前实现 | 面试建议说法 |
+|---|---|---|
+| 秒杀入口 | `SeckillVoucherByRedisAndKafka`（Lua 预检 + Kafka 异步落库） | 先讲当前主链路，再补充曾保留过 `channel` 版本用于演进对比。 |
+| Kafka 消费提交 | 使用 `reader.ReadMessage()`，当前为自动提交 offset | 明确这是“当前版本语义”；若追问高可靠消费，再说明可升级为 `FetchMessage + CommitMessages` 手动提交。 |
+| 缓存逻辑过期 | Value 内有逻辑过期时间，同时当前实现也设置了物理 TTL | 讲成“逻辑过期 + 物理 TTL 兜底”的混合策略，不要说“永不过期”。 |
+| 自研分布式锁 | 已实现可重试 + 看门狗续期；可重入尚未落地 | 先讲已上线能力，再把可重入作为后续演进项。 |
+
+一句话版本（建议开场）：
+
+> 项目当前线上主链路是 `Redis+Lua` 做秒杀资格原子预检，`Kafka` 做异步削峰，MySQL 用 `stock > 0` 条件更新防超卖，缓存侧按场景组合使用空值缓存、互斥锁和逻辑过期策略。
+
 ## 架构亮点与核心技术选型
 
-- **分布式会话与安全认证**：
-  摒弃传统 Session，基于 Redis 设计无状态 Token 认证中心。结合 Gin 路由中间件实现全局鉴权拦截与权限动态续期。
+这一部分按“问题 -> 方案 -> 价值”组织，便于面试官快速理解你做了什么，以及为什么这么做。
 
-- **多级缓存架构与高可用保障**：
-  深度应用 Redis 提升核心接口读性能，基于 Cache Aside 模式保障数据库与缓存的双写一致性。针对恶意攻击与突发流量，综合运用**缓存空对象，互斥锁，逻辑过期**等企业级策略，保障系统高可用。
+| 业务痛点 | 项目实现 | 关键机制 | 工程价值 |
+|---|---|---|---|
+| 集群下登录态不共享、频繁掉线 | Redis + Token 无状态会话，双中间件鉴权 | `RefreshTokenInterceptor` 全局续期 + `LoginInterceptor` 路由鉴权 | 兼顾开放接口匿名访问和登录态平滑续期 |
+| 高并发读场景数据库压力大 | Cache Aside + 多策略缓存治理 | 空值缓存防穿透、互斥锁与逻辑过期抗击穿、随机 TTL 抗雪崩 | 提升命中率，降低 DB 峰值压力 |
+| 秒杀链路并发冲突与超卖风险 | Redis + Lua 资格预检，MySQL 条件更新扣库存 | Lua 原子校验库存/一人一单；`stock > 0` 防超卖 | 把高并发冲突前移到 Redis 层处理 |
+| 秒杀高峰期间数据库写入抖动 | Kafka 异步化下单 | 预检成功即投递消息，消费端异步落库 | 请求快速返回，削峰填谷保护 DB |
+| 分布式环境下订单 ID 唯一性 | Redis 全局 ID 生成器 | 时间戳 + Redis 自增序列 | 支撑高并发下唯一、趋势递增 ID |
+| 社交与地理检索场景 SQL 代价高 | Redis 多数据结构建模 | ZSet/Set/GEO/BitMap/HyperLogLog 分场景优化 | 用空间换时间，减少复杂 SQL |
 
-- **高并发秒杀架构演进与防超卖机制**：
-  重构秒杀下单链路，将同步抢购升级为异步处理。首层采用 **Redis + Lua 脚本**将库存校验与防重（一人一单）封装为原子操作进行资格预检。针对数据库层面的并发安全，引入**基于Redis的分布式锁**保障集群模式下“一人一单”业务逻辑的正确性。
+可量化收益建议在面试时补充两类指标：
 
-- **基于 Go 原生特性的异步削峰填谷**：
-  引入 **Kafka** 代替Go原生的channel内存消息队列进行消息的可靠投递与消费，提升秒杀接口的 QPS 吞吐量，降低了 MySQL 的瞬间写入压力。
+- 性能类：接口 RT、QPS、缓存命中率、DB 连接池峰值。
+- 稳定性类：秒杀失败率、超卖率、重复下单率、消息堆积与消费延迟。
 
-- **分布式全局唯一ID生成**：
-  针对分库分表及海量订单场景，独立设计并实现了基于Redis的高性能分布式 ID生成器，结合时间戳与 Redis 自增序列，保证了全局 ID 的唯一性、递增性与高安全性
-- **Redis 高级数据结构的多场景挖掘**：
-  充分利用 Redis 的多态数据结构优化业务性能：
-  - 针对探店图文的发布与查看，基于**ZSet**实现了具有时间权重的点赞排行榜机制和以时间线排序的Feed流推送，并支持基于 Scroll 机制的无缝滚动分页查询。
-  - 基于 **Set** 高效实现了文章点赞、点赞排行榜及用户共同关注功能。
-  - 基于 **GEO** 数据结构实现 LBS 附近的商户地理位置检索与距离排序。
-  - 基于 **BitMap** 实现极低内存占用的用户连续签到与数据统计。
-  - 基于 **HyperLogLog** 实现内存极小且高精度的海量 UV 统计。
+## 亮点难点
 
-# 亮点难点
+这一部分建议你按“挑战 -> 方案 -> 取舍 -> 风险兜底”来回答。下面每个小节都可以独立作为面试问答素材。
 
-## 使用Redis解决了在集群模式下的Session共享问题，使用拦截器实现了用户的登录校验和权限刷新
+### 面试表达建议（30 秒版本）
+
+1. 先说背景：这是一个读多写多混合、秒杀峰值突发的 O2O 场景。
+2. 再说核心改造：登录态 Redis 化、缓存治理、秒杀异步化、分布式锁兜底。
+3. 最后说结果：请求更快返回、DB 压力更平稳、并发一致性可控。
+
+### 能力地图（面试官高频关注点）
+
+| 能力点 | 你在项目中的落地 |
+|---|---|
+| 并发控制 | Lua 原子脚本、MySQL 条件更新、分布式锁 |
+| 一致性设计 | Cache Aside 最终一致性 + TTL 兜底 |
+| 系统可用性 | 异步削峰、缓存降级、看门狗续期 |
+| 数据建模能力 | Redis 多结构按业务特征建模 |
+| 工程取舍能力 | 吞吐优先与一致性优先的分场景策略 |
+
+### 使用Redis解决了在集群模式下的Session共享问题，使用拦截器实现了用户的登录校验和权限刷新
 
 ### **为什么用 Redis 替代 Session？**
 
@@ -92,7 +197,7 @@
 * **复用内存上下文：** 第一层中间件查到 Redis 数据后，通过 `c.Set` 将其保存在了当次请求的 `gin.Context`（请求级上下文）中。第二层中间件只需要 `c.Get` 读取内存即可，**避免了在同一次请求处理中对 Redis 的重复查询**，极大地节省了开销。
 
 
-## 基于Cache Aside模式解决数据库与缓存的一致性问题
+### 基于Cache Aside模式解决数据库与缓存的一致性问题
 
 ### **如何保证数据库与缓存的一致性的？**
 
@@ -125,7 +230,7 @@
 这样在进行数据库更新时，会阻塞所有的读请求，直到数据库更新完毕且缓存失效后，才释放写锁。虽然牺牲了一定的系统吞吐量和并发度，但从根本上杜绝了脏数据的产生，保证了强一致性。
 
 
-## 使用 Redis 对高频访问的信息进行缓存，降低了数据库查询的压力,解决了缓存穿透、雪崩、击穿问题
+### 使用 Redis 对高频访问的信息进行缓存，降低了数据库查询的压力,解决了缓存穿透、雪崩、击穿问题
 
 ### 什么是缓存穿透，怎么解决？
 
@@ -140,7 +245,7 @@
 1. **对请求增加校验机制**
    例如：在 HTTP 接入层或中间件拦截，如果字段 ID 是长整型，若请求携带的格式不符或为负数，则直接返回错误。
 2. **使用布隆过滤器**
-   
+
    ![image](https://github.com/user-attachments/assets/86652912-0713-426c-a842-0366067c4225)
 
 一句话总结布隆过滤器：一个名叫 Bloom 的人提出了一种来检索元素是否在给定大集合中的数据结构，这种数据结构是高效且性能很好的，但缺点是具有一定的错误识别率和删除难度。并且，理论情况下，添加到集合中的元素越多，误报的可能性就越大。布隆过滤器说某个元素存在，小概率会误判。布隆过滤器说某个元素不在，那么这个元素一定不在。
@@ -193,7 +298,7 @@
 
   - 思想：空间换时间。
 
-  - 实现：Redis 中的 Key 不设置物理过期时间（永不淘汰），而是在 Value 结构体中单独封装一个 ExpireTime 逻辑过期时间字段。每次查询时先判断逻辑时间是否已过期，如果过期了，当前 Goroutine 会先直接返回旧数据，同时**开启一个独立的后台协程（Goroutine）**去异步查 DB 并更新缓存。
+   - 实现：在 Value 结构体中封装 `ExpireTime` 逻辑过期时间字段；查询时先判断逻辑时间是否已过期。若已过期，当前 Goroutine 先返回旧数据，同时**开启后台协程**异步查 DB 并重建缓存。当前代码中该 Key 还会设置物理 TTL 作为兜底。
 
   - 优缺点：响应性能极高，无阻塞等待；缺点是需要消耗额外内存封装时间字段，且在异步重建完成前，用户可能读到旧数据（短暂的数据不一致/脏读）。
 
@@ -216,7 +321,7 @@ Go 语言的并发模型非常轻量，开启 Goroutine 成本极低。将重建
 在极端高压场景下，即便后台协程查 DB 失败或发生 Panic，主业务逻辑依然能靠返回旧数据支撑基本盘，赋予了系统极强的“柔性可用”能力（容忍短暂的数据延迟更新，换取系统不宕机）。
 
 
-## 使用 Redis + Lua脚本实现对用户秒杀资格的预检，同时用乐观锁解决秒杀产生的超卖问题
+### 使用 Redis + Lua脚本实现对用户秒杀资格的预检，同时用乐观锁解决秒杀产生的超卖问题
 
 
 ### 为什么高并发秒杀要用 Redis + Lua？
@@ -290,7 +395,7 @@ Go 语言的并发模型非常轻量，开启 Goroutine 成本极低。将重建
 
 
 
-## 使用Redis分布式锁解决了在集群模式下一人一单的线程安全问题
+### 使用Redis分布式锁解决了在集群模式下一人一单的线程安全问题
 
 ### 为什么需要分布式锁？
 
@@ -304,7 +409,7 @@ Go 语言的并发模型非常轻量，开启 Goroutine 成本极低。将重建
 
 为了彻底吃透分布式锁的底层原理，本项目**虽然依赖了第三方的分布式锁框架redsync**，但是利用 Go 协程 + Redis + 自定义 Lua 脚本，纯手写实现了一套具备一些高级特性的分布式锁。一个高级的锁应当支持以下特性，如Java 领域的 Redisson
 
-**1. 可重入性设计 (未实现)**
+**1. 可重入性设计（规划中，当前未实现）**
 同一个协程（Goroutine）在已经持有某把锁的情况下，可以再次获取该锁而不被阻塞。这有效避免了在复杂业务方法互相调用时发生死锁。
 * **底层实现**：抛弃了简单的 `String` 结构，改用 Redis 的 `Hash` 数据结构来存储锁状态。
   * **大 Key**：锁的标识（如 `lock:order:1001`）。
@@ -327,11 +432,11 @@ Go 语言的并发模型非常轻量，开启 Goroutine 成本极低。将重建
 
 ![image-20241207183707979](https://cdn.jsdelivr.net/gh/KNeegcyao/picdemo/img/image-20241207183707979.png)
 
-## 基于 Kafka 消息队列实现异步秒杀下单
+### 基于 Kafka 消息队列实现异步秒杀下单
 
 ### 为什么用异步秒杀（引入消息队列的背景）?
 
-![image-20250307160040968](https://github.com/user-attachments/assets/30fdea5c-f0ef-46f8-ab6f-cbfd65e78072) 
+![image-20250307160040968](https://github.com/user-attachments/assets/30fdea5c-f0ef-46f8-ab6f-cbfd65e78072)
 
 在传统的同步秒杀场景中，我们使用 Jmeter 进行高并发压测，往往会发现**异常率极高，吞吐量（QPS）极低，平均响应耗时很长**。
 
@@ -367,9 +472,9 @@ Go 语言的并发模型非常轻量，开启 Goroutine 成本极低。将重建
    - 增加本地重试机制。在投递失败时，利用 Go 协程进行一定次数的自旋重试。
 2. **消息队列（Broker）存储不丢失**：
    - 为 Topic 设置多个 Partition，并配置多个副本（Replication Factor > 1）。即使某个 Broker 节点宕机，Follower 也能迅速切换为 Leader，保证数据不丢。
-3. **消费者（Consumer）消费不丢失**：
-   - **关闭自动提交 Offset（Auto Commit）**。
-   - 必须等待 Go 后台协程成功执行完 MySQL 的写入操作后，再**手动提交 Offset (Manual ACK)**。如果在写入数据库期间宕机，Offset 尚未提交，重启后消费者会再次拉取该消息重试。
+3. **消费者（Consumer）消费语义说明**：
+   - 当前代码使用 `reader.ReadMessage()`，属于自动提交 offset 的消费方式，实现简单、吞吐较高。
+   - 如果目标是更强的“处理成功后再提交”语义，可升级为 `FetchMessage + CommitMessages` 手动提交，并配合幂等写入。
 
 ### 怎么防止消息被重复消费？（幂等性问题）
 
@@ -413,35 +518,34 @@ return Result.Ok(orderId)
 **2. 消费者（后台长期运行的监听协程）**
 
 ```go
-// 启动服务时，在 main 或者初始化环节启动消费者 Goroutine
-func StartSeckillConsumer() {
-    go func() {
-        for {
-            // 阻塞等待拉取消息
-            m, err := global.KafkaReader.ReadMessage(context.Background())
-            if err != nil {
-                log.Error("拉取 Kafka 消息失败: %v", err)
-                continue
-            }
+func StartVoucherOrderConsumer() {
+   service := NewVoucherOrderService()
 
-            // 解析消息
-            var order VoucherOrderMessage
-            json.Unmarshal(m.Value, &order)
+   reader := kafka.NewReader(kafka.ReaderConfig{
+      Brokers: config.GlobalConfig.Kafka.Brokers,
+      GroupID: config.GlobalConfig.Kafka.GroupID,
+      Topic:   config.GlobalConfig.Kafka.Topic,
+   })
+   defer reader.Close()
 
-            // 执行耗时的数据库真实落库操作
-            err = handleVoucherOrder(order)
-            
-            // 只有当数据库更新成功，才手动 Commit（防止消息丢失）
-            if err == nil {
-                global.KafkaReader.CommitMessages(context.Background(), m)
-            } else {
-                log.Error("落库失败，将进行重试: %v", err)
-            }
-        }
-    }()
+   for {
+      msg, err := reader.ReadMessage(context.Background()) // 当前实现：自动提交 offset
+      if err != nil {
+         global.Logger.Error("读取 Kafka 消息失败: " + err.Error())
+         continue
+      }
+
+      var order entity.VoucherOrder
+      if err := json.Unmarshal(msg.Value, &order); err != nil {
+         global.Logger.Error("消息反序列化失败: " + err.Error())
+         continue
+      }
+
+      service.handleVoucherOrder(&order)
+   }
 }
 ```
-## 社交功能：点赞、关注与共同关注
+### 社交功能：点赞、关注与共同关注
 
 ### 1. 为什么使用 ZSet 实现点赞？
 对于高频变化的“点赞”数据，如果直接操作 MySQL 会引发严重的性能瓶颈。
@@ -457,7 +561,7 @@ func StartSeckillConsumer() {
 
 ---
 
-## 附近商铺搜索 (GEO)
+### 附近商铺搜索 (GEO)
 
 在“附近商铺”功能中，由于需要计算两点之间的球面距离并进行半径范围筛选，传统数据库难以高效支撑。本项目采用 Redis 的 **GEO** 数据结构实现。
 
@@ -469,7 +573,7 @@ func StartSeckillConsumer() {
 
 ---
 
-## 用户签到与连续签到统计 (BitMap)
+### 用户签到与连续签到统计 (BitMap)
 
 ### 为什么使用 BitMap？
 签到本质上只有两个状态：“已签到(1)”和“未签到(0)”。如果使用普通的数据库表或 Key-Value 存储，每个用户的每次签到都会产生一条记录，当用户基数庞大时，会消耗海量存储空间。
@@ -484,7 +588,7 @@ func StartSeckillConsumer() {
 
 ---
 
-## UV 统计 (HyperLogLog)
+### UV 统计 (HyperLogLog)
 
 ### UV 与 PV 的痛点
 * **PV (页面浏览量)**：可以直接用 Redis 的 `INCR` 计数。
