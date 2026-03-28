@@ -16,3 +16,11 @@ func init() {
 		// Async: false, // 默认是同步发送，如果要高吞吐可以设为 true 异步发送
 	}
 }
+
+// CloseKafkaWriter 在应用退出时关闭生产者，尽量保证缓冲区消息被刷出。
+func CloseKafkaWriter() error {
+	if KafkaWriter == nil {
+		return nil
+	}
+	return KafkaWriter.Close()
+}

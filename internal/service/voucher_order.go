@@ -39,12 +39,18 @@ var globalRedsync *redsync.Redsync
 //
 //go:embed seckill.lua
 var seckillLua string
-
 var seckillScript = redis.NewScript(seckillLua)
+
+//go:embed rollback.lua
+var rollbackLua string
+var rollbackSeckillScript = redis.NewScript(rollbackLua)
 
 // 定义阻塞队列 (平替 Java 的 ArrayBlockingQueue)
 // 创建一个容量为 1024 * 1024 的带有缓冲区的通道
 var orderTasks = make(chan *entity.VoucherOrder, 1024*1024)
+
+var voucherOrderConsumerCancel context.CancelFunc
+var stopVoucherOrderConsumerOnce sync.Once
 
 // 利用 Go 的 init() 函数，在程序一启动时就开启后台消费协程
 // 相当于 Java 里的 @PostConstruct 加上 new Thread().start()
@@ -52,10 +58,21 @@ func init() {
 	// redsync 连接池
 	pool := goredis.NewPool(global.RedisClient)
 	globalRedsync = redsync.New(pool)
+	consumerCtx, cancel := context.WithCancel(context.Background())
+	voucherOrderConsumerCancel = cancel
 	// 开启一个后台协程，专门负责从队列里取订单并写数据库
 	// go handleVoucherOrderTask()
 	// 启动消费者订阅 MQ 消息
-	go StartVoucherOrderConsumer()
+	go StartVoucherOrderConsumer(consumerCtx)
+}
+
+// StopVoucherOrderConsumer 停止 Kafka 订单消费者，用于应用优雅关闭。
+func StopVoucherOrderConsumer() {
+	stopVoucherOrderConsumerOnce.Do(func() {
+		if voucherOrderConsumerCancel != nil {
+			voucherOrderConsumerCancel()
+		}
+	})
 }
 
 // 3. 后台消费协程的具体逻辑
@@ -69,8 +86,8 @@ func handleVoucherOrderTask() {
 	}
 }
 
-// StartVoucherOrderConsumer 启动kafka消费者
-func StartVoucherOrderConsumer() {
+// StartVoucherOrderConsumer 启动 kafka 消费者。
+func StartVoucherOrderConsumer(ctx context.Context) {
 	service := NewVoucherOrderService()
 
 	// 初始化 Kafka Reader (消费者)
@@ -84,9 +101,12 @@ func StartVoucherOrderConsumer() {
 	global.Logger.Info("Kafka 消费者已启动，正在监听订单消息...")
 
 	for {
-		// ReadMessage 会自动提交 offset
-		msg, err := reader.ReadMessage(context.Background())
+		msg, err := reader.FetchMessage(ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				global.Logger.Info("Kafka 消费者收到停止信号，准备退出")
+				return
+			}
 			global.Logger.Error("读取 Kafka 消息失败: " + err.Error())
 			continue
 		}
@@ -95,18 +115,27 @@ func StartVoucherOrderConsumer() {
 		// 反序列化 JSON 到实体
 		if err := json.Unmarshal(msg.Value, &order); err != nil {
 			global.Logger.Error("消息反序列化失败: " + err.Error())
+			if commitErr := reader.CommitMessages(ctx, msg); commitErr != nil {
+				global.Logger.Error("提交 Kafka offset 失败: " + commitErr.Error())
+			}
 			continue
 		}
 
 		global.Logger.Info(fmt.Sprintf("【异步任务-Kafka】收到订单，开始写入数据库: 订单号=%d", order.ID))
 
-		// 调用原有的入库逻辑
-		service.handleVoucherOrder(&order)
+		if err := service.handleVoucherOrder(&order); err != nil {
+			global.Logger.Error("处理订单失败，将等待Kafka重投: " + err.Error())
+			continue
+		}
+
+		if err := reader.CommitMessages(ctx, msg); err != nil {
+			global.Logger.Error("提交 Kafka offset 失败: " + err.Error())
+		}
 	}
 
 }
 
-func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) {
+func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) error {
 	// 使用 context.Background() 给后台任务一个完全独立的生命周期！
 	// 这样不管前端用户是不是断网了，这个数据库写入都一定会坚决执行到底。
 	c := context.Background()
@@ -118,18 +147,22 @@ func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) {
 	mutex := globalRedsync.NewMutex(lockName)
 	if err := mutex.Lock(); err != nil {
 		global.Logger.Error(err.Error())
-		return
+		return err
 	}
-	defer mutex.Unlock()
+	defer func() {
+		if _, err := mutex.Unlock(); err != nil {
+			global.Logger.Error("释放 redsync 锁失败: " + err.Error())
+		}
+	}()
 
 	orderCount, err := vos.VoucherOrderRepository.CountVoucherOrderByUserIdAndVoucherId(c, userId, voucherId)
 	if err != nil {
 		global.Logger.Error(err.Error())
-		return
+		return err
 	}
 
 	if orderCount > 0 {
-		return
+		return nil
 	}
 
 	// 开启数据库事务
@@ -152,6 +185,15 @@ func (vos *VoucherOrderService) handleVoucherOrder(order *entity.VoucherOrder) {
 	err = global.Db.WithContext(c).Transaction(tran)
 	if err != nil {
 		global.Logger.Error(err.Error())
+		return err
+	}
+
+	return nil
+}
+
+func rollbackSeckillReservation(c context.Context, voucherId, userId uint64) {
+	if _, err := rollbackSeckillScript.Run(c, global.RedisClient, []string{}, voucherId, userId).Result(); err != nil {
+		global.Logger.Error("回滚秒杀预扣失败: " + err.Error())
 	}
 }
 
@@ -202,6 +244,7 @@ func (vos *VoucherOrderService) SeckillVoucherByRedisAndKafka(c context.Context,
 	// 2. 将订单序列化为 JSON
 	orderBytes, err := json.Marshal(voucherOrder)
 	if err != nil {
+		rollbackSeckillReservation(c, voucherId, userId)
 		return dto.Fail("消息序列化失败")
 	}
 
@@ -215,6 +258,7 @@ func (vos *VoucherOrderService) SeckillVoucherByRedisAndKafka(c context.Context,
 	err = global.KafkaWriter.WriteMessages(c, msg)
 	if err != nil {
 		global.Logger.Error("Kafka 消息发送失败: " + err.Error())
+		rollbackSeckillReservation(c, voucherId, userId)
 		return dto.Fail("系统繁忙，请稍后再试！")
 	}
 

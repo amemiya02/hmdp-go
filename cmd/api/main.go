@@ -1,7 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/amemiya02/hmdp-go/internal/global"
@@ -11,6 +16,7 @@ import (
 	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/amemiya02/hmdp-go/internal/handler"
 	"github.com/amemiya02/hmdp-go/internal/middleware"
+	"github.com/amemiya02/hmdp-go/internal/service"
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
@@ -24,9 +30,37 @@ func main() {
 	//  启动服务
 	port := config.GlobalConfig.Server.Port
 	global.Logger.Info(fmt.Sprintf("server start on port %d", port))
-	if err := r.Run(fmt.Sprintf(":%d", port)); err != nil {
-		panic("server start failed: " + err.Error())
+
+	server := &http.Server{
+		Addr:    fmt.Sprintf(":%d", port),
+		Handler: r,
 	}
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			panic("server start failed: " + err.Error())
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	global.Logger.Info("收到退出信号，开始优雅关闭...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		global.Logger.Error("HTTP服务优雅关闭失败: " + err.Error())
+	}
+
+	service.StopVoucherOrderConsumer()
+	if err := global.CloseKafkaWriter(); err != nil {
+		global.Logger.Error("Kafka 生产者关闭失败: " + err.Error())
+	}
+
+	global.Logger.Info("服务已完成优雅关闭")
 }
 
 // SetupRouter 注册所有路由
