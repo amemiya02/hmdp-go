@@ -145,6 +145,16 @@ go test -v -run "Concurrent" ./internal/service/
 | 集成测试 | `service/voucher_order_test.go` | V1/V2/V3 全链路、登录校验、库存检查 |
 | 并发测试 | `service/voucher_order_test.go` | 200 并发超卖防护、同用户重复下单 |
 
+### 测试结果
+
+| 维度 | V1 (Sync) | V2 (Channel) | V3 异步 (Kafka Async) | V3 同步 (Kafka Sync) |
+|------|-----------|--------------|----------------------|---------------------|
+| QPS 上限 | ~50 | ~45,000 | ~45,000 | ~500 |
+| P50 延迟 | 0-13ms | 2-8ms | 2-8ms | 7-18ms |
+| P99 延迟 | 5-10s (锁超时) | 4-10ms | 4-10ms | ~1s |
+| 适用场景 | 低并发、强一致 | 高并发、单实例 | 高并发、多实例、高可靠 | 需要同步确认 |
+| 超卖防护 | 分布式锁 + DB 事务 | Redis Lua 预检 | Redis Lua 预检 | Redis Lua 预检 |
+
 ## 架构亮点与核心技术选型
 
 详见 [docs/architecture-highlights.md](docs/architecture-highlights.md)
