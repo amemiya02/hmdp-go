@@ -24,10 +24,11 @@ import (
 func main() {
 	global.Logger.Info("Starting...")
 
-	//  注册路由
-	r := SetupRouter()
+	voucherOrderService := service.NewVoucherOrderService()
+	go voucherOrderService.StartKafkaConsumer()
 
-	//  启动服务
+	r := SetupRouter(voucherOrderService)
+
 	port := config.GlobalConfig.Server.Port
 	global.Logger.Info(fmt.Sprintf("server start on port %d", port))
 
@@ -55,7 +56,7 @@ func main() {
 		global.Logger.Error("HTTP服务优雅关闭失败: " + err.Error())
 	}
 
-	service.StopVoucherOrderConsumer()
+	voucherOrderService.StopConsumer()
 	if err := global.CloseKafkaWriter(); err != nil {
 		global.Logger.Error("Kafka 生产者关闭失败: " + err.Error())
 	}
@@ -64,7 +65,7 @@ func main() {
 }
 
 // SetupRouter 注册所有路由
-func SetupRouter() *gin.Engine {
+func SetupRouter(voucherOrderService *service.VoucherOrderService) *gin.Engine {
 
 	//  初始化Gin引擎
 	r := gin.Default()
@@ -125,7 +126,7 @@ func SetupRouter() *gin.Engine {
 		voucherGroup.POST("", voucherHandler.AddVoucher)
 		voucherGroup.GET("/list/:shopId", voucherHandler.QueryVoucherOfShop)
 	}
-	voucherOrderHandler := handler.NewVoucherOrderHandler()
+	voucherOrderHandler := handler.NewVoucherOrderHandler(voucherOrderService)
 	voucherOrderGroup := r.Group("/voucher-order").Use(middleware.LoginInterceptor())
 	{
 		voucherOrderGroup.POST("/seckill/:id", voucherOrderHandler.SeckillVoucher)

@@ -11,9 +11,9 @@ type VoucherOrderHandler struct {
 	VoucherOrderService *service.VoucherOrderService
 }
 
-func NewVoucherOrderHandler() *VoucherOrderHandler {
+func NewVoucherOrderHandler(vos *service.VoucherOrderService) *VoucherOrderHandler {
 	return &VoucherOrderHandler{
-		VoucherOrderService: service.NewVoucherOrderService(),
+		VoucherOrderService: vos,
 	}
 }
 
@@ -25,5 +25,5 @@ func (vo *VoucherOrderHandler) SeckillVoucher(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, vo.VoucherOrderService.SeckillVoucherByRedisAndKafka(c, req.ID))
+	c.JSON(http.StatusOK, vo.VoucherOrderService.SeckillVoucherV3(c, req.ID))
 }
