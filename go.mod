@@ -5,7 +5,6 @@ go 1.25.6
 require (
 	github.com/gin-contrib/cors v1.7.6
 	github.com/gin-gonic/gin v1.10.1
-	github.com/go-redsync/redsync/v4 v4.16.0
 	github.com/google/uuid v1.6.0
 	github.com/redis/go-redis/v9 v9.17.3
 	github.com/segmentio/kafka-go v0.4.50
@@ -29,8 +28,6 @@ require (
 	github.com/go-sql-driver/mysql v1.7.0 // indirect
 	github.com/go-viper/mapstructure/v2 v2.4.0 // indirect
 	github.com/goccy/go-json v0.10.5 // indirect
-	github.com/hashicorp/errwrap v1.1.0 // indirect
-	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/jinzhu/now v1.1.5 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect

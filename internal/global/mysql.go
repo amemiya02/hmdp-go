@@ -20,7 +20,7 @@ func init() {
 	port := cfg.Port
 	dbName := cfg.DbName
 
-	dsn := username + ":" + password + "@tcp(" + host + port + ")/" + dbName + "?charset=" + cfg.Charset + "&parseTime=True&loc=Local"
+	dsn := username + ":" + password + "@tcp(" + host + ":" + port + ")/" + dbName + "?charset=" + cfg.Charset + "&parseTime=True&loc=Local"
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
 		Logger: logger.Default.LogMode(logger.Info),

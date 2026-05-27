@@ -6,9 +6,9 @@ server:
 # MySQL 数据库配置
 mysql:
   host: "127.0.0.1"
-  port: :3306
+  port: 3306
   username: "root"
-  password: "123456"
+  password: ""
   dbname: "hmdp"
   charset: "utf8mb4"
   max_open_conns: 20  # 最大连接数
@@ -17,7 +17,7 @@ mysql:
 # Redis 配置
 redis:
   host: "127.0.0.1"
-  port: :6379
+  port: 6379
   password: ""
   db: 0
   timeout: 5000  # 超时时间(ms)

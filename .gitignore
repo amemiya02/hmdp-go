@@ -2,3 +2,5 @@
 .vscode/
 internal/test/tokens.csv
 api
+.omc/
+docs/test*

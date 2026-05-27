@@ -13,7 +13,7 @@ var RedisClient *redis.Client
 func init() {
 	cfg := config.GlobalConfig.Redis
 	RedisClient = redis.NewClient(&redis.Options{
-		Addr:     cfg.Host + cfg.Port,
+		Addr:     cfg.Host + ":" + cfg.Port,
 		Password: cfg.Password,
 		DB:       cfg.Db,
 	})

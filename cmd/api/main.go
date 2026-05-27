@@ -71,7 +71,7 @@ func SetupRouter(voucherOrderService *service.VoucherOrderService) *gin.Engine {
 	r := gin.Default()
 	r.Use(cors.New(cors.Config{
 		// 允许的源：这里写你的前端地址
-		AllowOrigins: []string{"http://localhost:8080"},
+		AllowOrigins: []string{"http://localhost:8080", "http://localhost:9099"},
 		// 允许的方法
 		AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"},
 		// 允许的 Header

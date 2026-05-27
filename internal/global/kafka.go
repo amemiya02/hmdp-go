@@ -1,6 +1,8 @@
 package global
 
 import (
+	"time"
+
 	"github.com/amemiya02/hmdp-go/config"
 	"github.com/segmentio/kafka-go"
 )
@@ -10,10 +12,12 @@ var KafkaWriter *kafka.Writer
 func init() {
 	// 初始化 Kafka 生产者 (Writer)
 	KafkaWriter = &kafka.Writer{
-		Addr:     kafka.TCP(config.GlobalConfig.Kafka.Brokers...),
-		Topic:    config.GlobalConfig.Kafka.Topic,
-		Balancer: &kafka.LeastBytes{}, // 负载均衡策略
-		// Async: false, // 默认是同步发送，如果要高吞吐可以设为 true 异步发送
+		Addr:      kafka.TCP(config.GlobalConfig.Kafka.Brokers...),
+		Topic:     config.GlobalConfig.Kafka.Topic,
+		Balancer:  &kafka.LeastBytes{}, // 负载均衡策略
+		Async:     true,                // 异步发送，提升吞吐量
+		BatchSize: 100,                 // 批量攒够 100 条再发
+		BatchTimeout: 10 * time.Millisecond, // 或每 10ms 发一批
 	}
 }
 
