@@ -1,3 +1,5 @@
+//go:build manual
+
 package test
 
 import (
@@ -32,7 +34,11 @@ func TestGenerate1000Tokens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("创建文件失败: %v", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			t.Errorf("关闭 Token 文件: %v", err)
+		}
+	}()
 
 	// 3. 开启 Redis Pipeline，极速批量写入，拒绝频繁的网络 IO！
 	pipe := global.RedisClient.Pipeline()
@@ -55,7 +61,9 @@ func TestGenerate1000Tokens(t *testing.T) {
 		pipe.Expire(ctx, tokenKey, 24*time.Hour)
 
 		// 将 Token 写入 CSV 文件，每行一个
-		file.WriteString(token + "\n")
+		if _, err := file.WriteString(token + "\n"); err != nil {
+			t.Fatalf("写入 Token 文件: %v", err)
+		}
 	}
 
 	// 4. 一次性将 1000 条命令发送给 Redis 执行

@@ -13,7 +13,7 @@
 
 本项目是基于 Go 语言生态对经典 O2O 社交与营销平台（[原黑马点评](https://www.bilibili.com/video/BV1NV411u7GE/)）的深度重构与架构升级。项目模拟了类似大众点评的核心业务场景，完成了从用户鉴权、商户查询、社交探店、到高并发秒杀抢券的完整业务闭环。
 
-在重构过程中，不仅实现了单体架构向高并发场景的平滑演进，更深度结合了 **Go 语言的高并发特性**（Goroutine + Channel）与多种分布式中间件（Redis、Kafka），系统性地解决了分布式会话、缓存雪崩/击穿/穿透、高并发秒杀超卖、分布式锁以及异步削峰等复杂架构痛点。适合作为展示高并发业务落地能力和 Go 生态工程化实践的标杆项目。
+项目用三个版本展示秒杀链路从同步事务、Channel 入队原型到 Kafka 异步落库的演进，并实现 Redis 登录态、空值缓存与互斥重建、Lua 原子预扣、数据库最终约束和可取消的优雅停机。重点是能解释实现、边界和取舍，而不是用未经验证的数据包装吞吐能力。
 
 - [原版 Java 架构参考](https://github.com/KNeegcyao/dianping)
 
@@ -42,7 +42,7 @@
 ### 2. 拉取依赖
 
 ```bash
-go mod tidy
+go mod download
 ```
 
 ### 3. 准备数据库与中间件
@@ -57,6 +57,13 @@ go mod tidy
 
 - MySQL 数据库：`hmdp`，建表脚本`hmdp.sql`已提供。
 - Kafka Topic：`voucher-order-topic`
+
+如果已经导入过旧版 SQL，需要补上一人一券的数据库最终约束：
+
+```sql
+ALTER TABLE tb_voucher_order
+ADD UNIQUE INDEX uk_voucher_order_user_voucher (user_id, voucher_id);
+```
 
 ### 4. 修改配置
 
@@ -88,74 +95,62 @@ curl http://localhost:8081/shop-type/list
 
 ### 常见问题
 
-- Redis 连接失败：检查 `redis.host + redis.port` 是否可达（端口字段是 `:6379` 这种格式）。
+- Redis 连接失败：检查 `redis.host + redis.port` 是否可达（端口字段写 `6379`，代码会拼接冒号）。
 - Kafka 无法消费：确认 `group_id`、`topic` 与 broker 地址一致，且 broker 对外地址可被本机访问。
 - MySQL 认证失败：检查账号密码、数据库名与字符集配置。
 
 ## 测试
 
-### 运行全部测试
+### 默认验证（无需 MySQL、Redis、Kafka）
 
 ```bash
-go test -v -count=1 -timeout 180s ./internal/service/seckill/ ./internal/service/order/ ./internal/service/
+go test -race -count=1 ./...
 ```
 
-### 运行测试并输出报告到 Markdown 文件
+默认测试覆盖 Kafka 消息构造与错误传播、消费者重试/提交顺序、Channel 取消语义和锁 Key 规则。CI 执行同一条命令。
+
+### 集成测试
+
+集成测试会连接并修改 `config/config.yaml` 指向的 MySQL 和 Redis，只应在独立测试环境运行：
 
 ```bash
-go test -v -count=1 -timeout 180s \
+go test -p=1 -v -count=1 -timeout 180s -tags=integration \
+  ./internal/util/ \
   ./internal/service/seckill/ \
   ./internal/service/order/ \
-  ./internal/service/ \
-  2>&1 | go run ./cmd/testreport/main.go > docs/test-report.md
+  ./internal/service/
 ```
 
-或直接使用管道脚本：
+### 接入路径压测
+
+压测不会随 `go test ./...` 自动执行：
 
 ```bash
-# 生成测试报告
+go test -v -count=1 -timeout 600s -tags=load \
+  -run '^TestLoadTest' ./internal/service/
+```
+
+V2/V3 压测使用内存队列或 fake Kafka writer，避免污染业务 Topic；结果只衡量 Redis 准入与应用内处理，不包含 broker 或异步落库，因此不能冒充端到端订单吞吐。
+
+### 生成测试报告
+
+```bash
 ./scripts/gen-test-report.sh
-# 报告输出到 docs/test-report.md
 ```
 
-### 按模块运行
-
-```bash
-# 仅运行 PreCheck 单元测试
-go test -v ./internal/service/seckill/
-
-# 仅运行 Executor 单元测试
-go test -v ./internal/service/order/
-
-# 仅运行集成与并发测试
-go test -v ./internal/service/
-
-# 仅运行并发超卖防护测试
-go test -v -run "Concurrent" ./internal/service/
-```
+报告写入 `docs/test-report.md`。脚本不会吞掉测试失败；任一测试失败时会以非零状态退出。
 
 ### 测试覆盖范围
 
 | 模块 | 测试文件 | 覆盖内容 |
 |------|---------|---------|
-| PreCheck | `seckill/precheck_test.go` | Lua 脚本三种返回值、Rollback 回滚 |
-| SyncExecutor | `order/sync_executor_test.go` | 分布式锁、DB 事务、重复下单、并发 |
-| ChannelExecutor | `order/channel_executor_test.go` | Channel 写入、满时阻塞 |
-| KafkaExecutor | `order/kafka_executor_test.go` | Kafka 发送、序列化、Context 取消 |
-| 集成测试 | `service/voucher_order_test.go` | V1/V2/V3 全链路、登录校验、库存检查 |
-| 并发测试 | `service/voucher_order_test.go` | 200 并发超卖防护、同用户重复下单 |
-
-### 测试结果
-
-| 维度 | V1 (Sync) | V2 (Channel) | V3 异步 (Kafka Async) | V3 同步 (Kafka Sync) |
-|------|-----------|--------------|----------------------|---------------------|
-| QPS 上限 | ~50 | ~45,000 | ~45,000 | ~500 |
-| P50 延迟 | 0-13ms | 2-8ms | 2-8ms | 7-18ms |
-| P99 延迟 | 5-10s (锁超时) | 4-10ms | 4-10ms | ~1s |
-| 适用场景 | 低并发、强一致 | 高并发、单实例 | 高并发、多实例、高可靠 | 需要同步确认 |
-| 超卖防护 | 分布式锁 + DB 事务 | Redis Lua 预检 | Redis Lua 预检 | Redis Lua 预检 |
+| KafkaExecutor | `order/kafka_executor_test.go` | 消息 Key/JSON、投递错误传播 |
+| Kafka Consumer | `service/voucher_order_consumer_test.go` | 处理失败不提交、提交失败不重复落库、幂等重放 |
+| ChannelExecutor | `order/channel_executor_test.go` | 入队、顺序、队列满时响应 Context |
+| RedissonLock | `util/redisson_lock_test.go` | Key 规则；集成标签验证加锁与解锁 |
+| PreCheck / SyncExecutor | `-tags=integration` | Redis Lua、补偿、MySQL 事务与并发 |
+| 接入路径压测 | `-tags=load` | 固定并发上限下的 QPS 与延迟分位数 |
 
 ## 架构亮点与核心技术选型
 
 详见 [docs/architecture-highlights.md](docs/architecture-highlights.md)
-

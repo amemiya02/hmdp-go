@@ -2,11 +2,13 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/amemiya02/hmdp-go/config"
 	"github.com/amemiya02/hmdp-go/internal/constant"
 	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
@@ -14,6 +16,8 @@ import (
 	"github.com/amemiya02/hmdp-go/internal/repository"
 	"github.com/amemiya02/hmdp-go/internal/util"
 	uuid2 "github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 type UserService struct {
@@ -33,18 +37,21 @@ func (us *UserService) SendCode(ctx context.Context, phone string) *dto.Result {
 		// 2.如果不符合，返回错误信息
 		return dto.Fail("手机号格式错误！")
 	}
+	if config.GlobalConfig.Server.Mode != "debug" {
+		return dto.Fail("短信网关尚未配置！")
+	}
 	// 3.符合，生成验证码
 	code := util.RandomNumbers(6)
 
 	// 4.保存验证码到 redis
 	key := constant.LoginCodeKey + phone
-	expiration := time.Duration(constant.LoginUserTtl) * time.Minute
+	expiration := time.Duration(constant.LoginCodeTTL) * time.Minute
 	err := global.RedisClient.Set(ctx, key, code, expiration).Err()
 	if err != nil {
 		return dto.Fail(fmt.Sprintf("生成验证码失败！\n%s", err.Error()))
 	}
-	// 5.发送验证码
-	global.Logger.Info(fmt.Sprintf("发送短信验证码成功，验证码：%s", code))
+	// 当前项目未接短信网关，仅在开发日志中提供验证码。
+	global.Logger.Info("开发模式验证码已生成", "phone", phone, "code", code)
 	// 返回ok
 	return dto.Ok()
 }
@@ -59,6 +66,9 @@ func (us *UserService) Login(ctx context.Context, loginForm dto.LoginForm) *dto.
 	// 3.从redis获取验证码并校验
 	cacheCode, err := global.RedisClient.Get(ctx, constant.LoginCodeKey+phone).Result()
 	code := loginForm.Code
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return dto.Fail("验证码校验失败！")
+	}
 	if err != nil || cacheCode != code {
 		// 不一致，报错
 		return dto.Fail("验证码错误")
@@ -67,9 +77,16 @@ func (us *UserService) Login(ctx context.Context, loginForm dto.LoginForm) *dto.
 	user, err := us.userRepo.FindUserByPhone(ctx, phone)
 
 	// 5.判断用户是否存在
-	if err != nil {
-		// 6.不存在，创建新用户并保存
-		user = us.createUserWithPhone(ctx, phone)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		user = &entity.User{
+			Phone:    phone,
+			NickName: constant.UserNickNamePrefix + util.RandomString(10),
+		}
+		if err := us.userRepo.CreateUser(ctx, user); err != nil {
+			return dto.Fail("新建用户失败！")
+		}
+	} else if err != nil {
+		return dto.Fail("查询用户失败！")
 	}
 
 	if user == nil {
@@ -87,28 +104,19 @@ func (us *UserService) Login(ctx context.Context, loginForm dto.LoginForm) *dto.
 		"nickName": user.NickName,
 		"icon":     user.Icon,
 	}
-	// 7.3.存储
+	// 7.3. 原子写入会话、TTL，并删除本次验证码。
 	tokenKey := constant.LoginUserKey + token
-	if err := global.RedisClient.HSet(ctx, tokenKey, userMap).Err(); err != nil {
-		return dto.Fail("")
+	if _, err := global.RedisClient.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.HSet(ctx, tokenKey, userMap)
+		pipe.Expire(ctx, tokenKey, constant.LoginUserTtl*time.Minute)
+		pipe.Del(ctx, constant.LoginCodeKey+phone)
+		return nil
+	}); err != nil {
+		return dto.Fail("保存登录状态失败！")
 	}
-
-	// 7.4.设置token有效期
-	global.RedisClient.Expire(ctx, tokenKey, constant.LoginUserTtl*time.Minute)
 
 	// 8.返回token
 	return dto.OkWithData(token)
-}
-
-func (us *UserService) createUserWithPhone(ctx context.Context, phone string) *entity.User {
-	user := &entity.User{}
-	user.Phone = phone
-	user.NickName = constant.UserNickNamePrefix + util.RandomString(10)
-	err := us.userRepo.CreateUser(ctx, user)
-	if err != nil {
-		return nil
-	}
-	return user
 }
 
 func (us *UserService) FindUserByID(ctx context.Context, id uint64) *dto.Result {
@@ -119,12 +127,13 @@ func (us *UserService) FindUserByID(ctx context.Context, id uint64) *dto.Result 
 	return dto.OkWithData(user)
 }
 
-func (us *UserService) Logout(c context.Context) *dto.Result {
-	userId := util.GetUserId(c)
-	if userId == 0 {
+func (us *UserService) Logout(ctx context.Context, token string) *dto.Result {
+	if token == "" {
 		return dto.Fail("请先登录！")
 	}
-	global.RedisClient.Del(c, constant.LoginUserKey+strconv.FormatUint(userId, 10))
+	if err := global.RedisClient.Del(ctx, constant.LoginUserKey+token).Err(); err != nil {
+		return dto.Fail("退出登录失败！")
+	}
 	return dto.Ok()
 }
 

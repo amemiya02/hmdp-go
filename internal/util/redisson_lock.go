@@ -38,12 +38,16 @@ type RedissonLock struct {
 
 func NewRedissonLock(ctx context.Context, name string, client *redis.Client, wait time.Duration) *RedissonLock {
 	return &RedissonLock{
-		name:   keyPrefix + name,
+		name:   name,
 		client: client,
 		token:  uuid.New().String(),
 		ctx:    ctx,
 		wait:   wait,
 	}
+}
+
+func (l *RedissonLock) key() string {
+	return keyPrefix + l.name
 }
 
 // TryLock 尝试获取锁（支持看门狗 和 重试）
@@ -60,8 +64,7 @@ func (l *RedissonLock) TryLock(expireSec uint64) bool {
 	// 3. 开启死循环，不断尝试
 
 	for {
-		key := keyPrefix + l.name
-		success, err := l.client.SetNX(l.ctx, key, l.token, l.expiration).Result()
+		success, err := l.client.SetNX(timeoutCtx, l.key(), l.token, l.expiration).Result()
 		// 如果没报错，且抢到了锁，直接返回 true，
 		if err == nil && success {
 			// 看门狗核心逻辑：获取锁成功后，启动一个后台协程续期
@@ -100,7 +103,7 @@ func (l *RedissonLock) startWatchDog(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			// 每隔 1/3 的时间，就去执行 Lua 脚本把过期时间重新撑满
-			renewScript.Run(context.Background(), l.client, []string{l.name}, l.token, int(l.expiration.Seconds()))
+			renewScript.Run(context.Background(), l.client, []string{l.key()}, l.token, int(l.expiration.Seconds()))
 		case <-ctx.Done():
 			// 收到外部的取消信号（说明业务层调用了 Unlock），看门狗光荣下班，退出协程
 			return
@@ -116,6 +119,8 @@ func (l *RedissonLock) Unlock() error {
 	}
 
 	// 2. 使用 Lua 脚本安全删除锁
-	_, err := UnlockScript.Run(l.ctx, l.client, []string{l.name}, l.token).Result()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(l.ctx), 2*time.Second)
+	defer cancel()
+	_, err := UnlockScript.Run(ctx, l.client, []string{l.key()}, l.token).Result()
 	return err
 }

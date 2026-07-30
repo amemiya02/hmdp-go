@@ -1,6 +1,8 @@
 package global
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/amemiya02/hmdp-go/config"
@@ -11,36 +13,46 @@ import (
 
 var Db *gorm.DB
 
-// 初始化MySQL连接
-func init() {
+func initMySQL(ctx context.Context) error {
 	cfg := config.GlobalConfig.MySQL
-	username := cfg.Username
-	password := cfg.Password
-	host := cfg.Host
-	port := cfg.Port
-	dbName := cfg.DbName
-
-	dsn := username + ":" + password + "@tcp(" + host + ":" + port + ")/" + dbName + "?charset=" + cfg.Charset + "&parseTime=True&loc=Local"
+	dsn := cfg.Username + ":" + cfg.Password + "@tcp(" + cfg.Host + ":" + cfg.Port + ")/" + cfg.DbName +
+		"?charset=" + cfg.Charset + "&parseTime=True&loc=Local"
 
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		DisableAutomaticPing: true,
+		Logger:               logger.Default.LogMode(logger.Info),
+		TranslateError:       true,
 	})
-
 	if err != nil {
-		Logger.Error(err.Error())
+		return fmt.Errorf("connect mysql: %w", err)
 	}
 
 	sqlDB, err := db.DB()
-
 	if err != nil {
-		Logger.Error(err.Error())
+		return fmt.Errorf("get mysql connection pool: %w", err)
+	}
+	if err := sqlDB.PingContext(ctx); err != nil {
+		_ = sqlDB.Close()
+		return fmt.Errorf("ping mysql: %w", err)
 	}
 
 	sqlDB.SetMaxIdleConns(cfg.MaxIdleConns)
 	sqlDB.SetMaxOpenConns(cfg.MaxOpenConns)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	Logger.Info("Connected to MySQL...")
-
 	Db = db
+	Logger.Info("Connected to MySQL")
+	return nil
+}
+
+func closeMySQL() error {
+	if Db == nil {
+		return nil
+	}
+	sqlDB, err := Db.DB()
+	if err != nil {
+		return err
+	}
+	Db = nil
+	return sqlDB.Close()
 }

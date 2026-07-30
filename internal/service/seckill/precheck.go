@@ -27,12 +27,33 @@ func NewPreCheck(rdb *redis.Client) *PreCheck {
 }
 
 func (p *PreCheck) Check(ctx context.Context, userId uint64, voucherId uint64) (uint64, error) {
+	return p.check(ctx, userId, voucherId, false)
+}
+
+// CheckForKafka 原子预扣库存并保存待投递订单，供 Kafka 失败后重试。
+func (p *PreCheck) CheckForKafka(ctx context.Context, userId uint64, voucherId uint64) (uint64, error) {
+	return p.check(ctx, userId, voucherId, true)
+}
+
+func (p *PreCheck) check(ctx context.Context, userId uint64, voucherId uint64, persistPending bool) (uint64, error) {
 	orderId, err := util.NextId(ctx, p.RedisClient, constant.OrderIdPrefix)
 	if err != nil {
 		return 0, fmt.Errorf("ID 生成失败: %w", err)
 	}
 
-	result, err := seckillScript.Run(ctx, p.RedisClient, []string{}, voucherId, userId).Result()
+	pendingFlag := 0
+	if persistPending {
+		pendingFlag = 1
+	}
+	result, err := seckillScript.Run(
+		ctx,
+		p.RedisClient,
+		[]string{},
+		voucherId,
+		userId,
+		orderId,
+		pendingFlag,
+	).Result()
 	if err != nil {
 		return 0, fmt.Errorf("Lua 脚本执行失败: %w", err)
 	}
@@ -49,8 +70,9 @@ func (p *PreCheck) Check(ctx context.Context, userId uint64, voucherId uint64) (
 }
 
 // Rollback 回滚 Redis 预扣库存
-func (p *PreCheck) Rollback(ctx context.Context, voucherId, userId uint64) {
+func (p *PreCheck) Rollback(ctx context.Context, voucherId, userId uint64) error {
 	if _, err := rollbackSeckillScript.Run(ctx, p.RedisClient, []string{}, voucherId, userId).Result(); err != nil {
-		fmt.Printf("回滚秒杀预扣失败: %v\n", err)
+		return fmt.Errorf("回滚秒杀预扣失败: %w", err)
 	}
+	return nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -9,10 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/amemiya02/hmdp-go/internal/global"
-
 	"github.com/amemiya02/hmdp-go/config"
-	_ "github.com/amemiya02/hmdp-go/config"
 	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/amemiya02/hmdp-go/internal/handler"
 	"github.com/amemiya02/hmdp-go/internal/middleware"
@@ -22,10 +20,37 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		global.Logger.Error("application stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run() (runErr error) {
+	startupCtx, cancelStartup := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelStartup()
+	if err := global.Init(startupCtx); err != nil {
+		return fmt.Errorf("initialize infrastructure: %w", err)
+	}
+	safeToCloseDependencies := true
+	defer func() {
+		if safeToCloseDependencies {
+			runErr = errors.Join(runErr, global.Close())
+		}
+	}()
+
 	global.Logger.Info("Starting...")
 
 	voucherOrderService := service.NewVoucherOrderService()
-	go voucherOrderService.StartKafkaConsumer()
+	signalCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	consumerCtx, cancelConsumer := context.WithCancel(context.Background())
+	defer cancelConsumer()
+
+	consumerDone := make(chan error, 1)
+	go func() {
+		consumerDone <- voucherOrderService.StartKafkaConsumer(consumerCtx)
+	}()
 
 	r := SetupRouter(voucherOrderService)
 
@@ -37,31 +62,57 @@ func main() {
 		Handler: r,
 	}
 
+	serverDone := make(chan error, 1)
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			panic("server start failed: " + err.Error())
-		}
+		serverDone <- server.ListenAndServe()
 	}()
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
+	consumerStopped := false
+	select {
+	case <-signalCtx.Done():
+	case err := <-serverDone:
+		if !errors.Is(err, http.ErrServerClosed) {
+			runErr = fmt.Errorf("serve HTTP: %w", err)
+		}
+		stop()
+	case err := <-consumerDone:
+		consumerStopped = true
+		if err != nil {
+			runErr = fmt.Errorf("consume voucher orders: %w", err)
+		}
+		stop()
+	}
 
 	global.Logger.Info("收到退出信号，开始优雅关闭...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	httpShutdownCtx, cancelHTTPShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := server.Shutdown(httpShutdownCtx); err != nil {
+		runErr = errors.Join(runErr, fmt.Errorf("shutdown HTTP server: %w", err))
+		safeToCloseDependencies = false
+	}
+	cancelHTTPShutdown()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		global.Logger.Error("HTTP服务优雅关闭失败: " + err.Error())
+	cancelConsumer()
+	if !consumerStopped {
+		consumerShutdownCtx, cancelConsumerShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+		select {
+		case err := <-consumerDone:
+			if err != nil {
+				runErr = errors.Join(runErr, fmt.Errorf("stop voucher order consumer: %w", err))
+			}
+		case <-consumerShutdownCtx.Done():
+			runErr = errors.Join(runErr, fmt.Errorf("stop voucher order consumer: %w", consumerShutdownCtx.Err()))
+			// ponytail: process exit owns cleanup when a goroutine ignores
+			// cancellation; closing shared clients underneath it is unsafe.
+			safeToCloseDependencies = false
+		}
+		cancelConsumerShutdown()
 	}
 
-	voucherOrderService.StopConsumer()
-	if err := global.CloseKafkaWriter(); err != nil {
-		global.Logger.Error("Kafka 生产者关闭失败: " + err.Error())
+	if safeToCloseDependencies {
+		global.Logger.Info("服务已完成优雅关闭")
 	}
-
-	global.Logger.Info("服务已完成优雅关闭")
+	return runErr
 }
 
 // SetupRouter 注册所有路由
@@ -69,6 +120,7 @@ func SetupRouter(voucherOrderService *service.VoucherOrderService) *gin.Engine {
 
 	//  初始化Gin引擎
 	r := gin.Default()
+	r.ContextWithFallback = true
 	r.Use(cors.New(cors.Config{
 		// 允许的源：这里写你的前端地址
 		AllowOrigins: []string{"http://localhost:8080", "http://localhost:9099"},

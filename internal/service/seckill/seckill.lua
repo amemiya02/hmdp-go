@@ -3,6 +3,10 @@
 local voucherId = ARGV[1]
 -- 1.2 用户id
 local userId = ARGV[2]
+-- 1.3 订单id
+local orderId = ARGV[3]
+-- 1.4 是否写入 Kafka 待投递记录
+local persistPending = ARGV[4]
 
 -- 2. 数据key
 -- 2.1 库存key
@@ -27,5 +31,14 @@ end
 redis.call("incrby", stockKey, -1)
 -- 3.4 下单 sadd orderKey userId
 redis.call("sadd", orderKey, userId)
+
+if (persistPending == "1") then
+    local pendingKey = "seckill:pending:" .. orderId
+    redis.call("hset", pendingKey,
+        "id", orderId,
+        "user_id", userId,
+        "voucher_id", voucherId)
+    redis.call("sadd", "seckill:pending:orders", orderId)
+end
 
 return 0

@@ -9,10 +9,10 @@ type VoucherOrder struct {
 	// 主键 (注意：这里没有 autoIncrement，通常由雪花算法等全局ID生成器生成)
 	ID int64 `gorm:"column:id;primaryKey" json:"id"`
 
-	UserID    uint64 `gorm:"column:user_id" json:"userId"`          // 下单的用户id
-	VoucherID uint64 `gorm:"column:voucher_id" json:"voucherId"`    // 购买的代金券id
-	PayType   uint8  `gorm:"column:pay_type" json:"payType"`        // 支付方式 1：余额支付；2：支付宝；3：微信
-	Status    uint8  `gorm:"column:status;default:1" json:"status"` // 订单状态，1：未支付；2：已支付；3：已核销；4：已取消；5：退款中；6：已退款
+	UserID    uint64 `gorm:"column:user_id;uniqueIndex:uk_voucher_order_user_voucher" json:"userId"`       // 下单的用户id
+	VoucherID uint64 `gorm:"column:voucher_id;uniqueIndex:uk_voucher_order_user_voucher" json:"voucherId"` // 购买的代金券id
+	PayType   uint8  `gorm:"column:pay_type" json:"payType"`                                               // 支付方式 1：余额支付；2：支付宝；3：微信
+	Status    uint8  `gorm:"column:status;default:1" json:"status"`                                        // 订单状态，1：未支付；2：已支付；3：已核销；4：已取消；5：退款中；6：已退款
 
 	// 下面三个时间字段可能为空，因此必须使用指针类型 *time.Time
 	PayTime    *time.Time `gorm:"column:pay_time" json:"payTime"`       // 支付时间

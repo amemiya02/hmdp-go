@@ -20,7 +20,7 @@ redis:
   port: 6379
   password: ""
   db: 0
-  timeout: 5000  # 超时时间(ms)
+  timeout: 5s
 
 kafka:
   brokers:

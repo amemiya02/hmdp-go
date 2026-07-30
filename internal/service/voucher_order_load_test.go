@@ -1,3 +1,5 @@
+//go:build load
+
 package service
 
 import (
@@ -10,31 +12,27 @@ import (
 	"testing"
 	"time"
 
-	"github.com/amemiya02/hmdp-go/config"
-	_ "github.com/amemiya02/hmdp-go/config"
-	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
-	"github.com/segmentio/kafka-go"
 )
 
 // LoadTestResult 压测结果
 type LoadTestResult struct {
-	TotalRequests   int64
-	SuccessCount    int64
-	FailCount       int64
-	TotalDuration   time.Duration
-	MinLatency      time.Duration
-	MaxLatency      time.Duration
-	AvgLatency      time.Duration
-	P50             time.Duration
-	P90             time.Duration
-	P95             time.Duration
-	P99             time.Duration
-	QPS             float64
-	ThroughputMB    float64
-	ErrorBreakdown  map[string]int64
-	Concurrency     int
-	Stock           int
+	TotalRequests  int64
+	SuccessCount   int64
+	FailCount      int64
+	TotalDuration  time.Duration
+	MinLatency     time.Duration
+	MaxLatency     time.Duration
+	AvgLatency     time.Duration
+	P50            time.Duration
+	P90            time.Duration
+	P95            time.Duration
+	P99            time.Duration
+	QPS            float64
+	ThroughputMB   float64
+	ErrorBreakdown map[string]int64
+	Concurrency    int
+	Stock          int
 }
 
 func (r *LoadTestResult) String() string {
@@ -49,13 +47,15 @@ func (r *LoadTestResult) String() string {
 	)
 }
 
-// runLoadTest 通用压测框架
+// runLoadTest 统计接口接入路径的响应耗时；V2/V3 不包含异步落库完成时间。
 func runLoadTest(t *testing.T, testName string, stock int, concurrency int, totalRequests int, version string) *LoadTestResult {
+	t.Helper()
 	vid := uint64(time.Now().UnixNano() % 10000000)
 	setupSeckillData(t, vid, stock)
-	defer cleanupSeckillData(vid)
+	defer cleanupSeckillData(t, vid)
 
-	svc := NewVoucherOrderService()
+	// Load tests must not leave messages in the application's Kafka topic.
+	svc, kafkaWriter := newVoucherOrderServiceWithRecordingKafka()
 
 	var fn func(ctx context.Context, voucherId uint64) *dto.Result
 	switch version {
@@ -134,10 +134,35 @@ func runLoadTest(t *testing.T, testName string, stock int, concurrency int, tota
 		Stock:          stock,
 	}
 
-	// 确保无超卖
-	dbOrders := getDBOrderCount(vid)
-	if int(dbOrders) > stock {
-		t.Errorf("OVERSELL! stock=%d but DB orders=%d", stock, dbOrders)
+	expectedSuccesses := stock
+	if totalRequests < expectedSuccesses {
+		expectedSuccesses = totalRequests
+	}
+	if successCount != int64(expectedSuccesses) {
+		t.Fatalf("%s %s successes = %d, want %d; errors=%v", testName, version, successCount, expectedSuccesses, errBreakdown)
+	}
+	if redisStock := getRedisStock(t, vid); redisStock != stock-expectedSuccesses {
+		t.Fatalf("%s %s Redis stock = %d, want %d", testName, version, redisStock, stock-expectedSuccesses)
+	}
+
+	dbOrders := getDBOrderCount(t, vid)
+	if version == "V1" && dbOrders != successCount {
+		t.Fatalf("%s DB orders = %d, want %d", testName, dbOrders, successCount)
+	}
+	if version != "V1" && dbOrders != 0 {
+		t.Fatalf("%s %s unexpectedly persisted %d orders", testName, version, dbOrders)
+	}
+	expectedKafkaWrites := 0
+	if version == "V3" {
+		expectedKafkaWrites = int(successCount)
+	}
+	if kafkaWriter.Count() != expectedKafkaWrites {
+		t.Fatalf("%s %s Kafka writer calls = %d, want %d", testName, version, kafkaWriter.Count(), expectedKafkaWrites)
+	}
+	if version == "V3" {
+		if pending := getPendingOrderCount(t, vid); pending != 0 {
+			t.Fatalf("%s %s pending orders = %d, want 0", testName, version, pending)
+		}
 	}
 
 	// 对 V2 消费 channel
@@ -152,6 +177,9 @@ func runLoadTest(t *testing.T, testName string, stock int, concurrency int, tota
 			}
 		}
 	done:
+		if consumed != int(successCount) {
+			t.Fatalf("%s channel entries = %d, want %d", testName, consumed, successCount)
+		}
 		t.Logf("V2 channel consumed: %d", consumed)
 	}
 
@@ -216,7 +244,7 @@ func TestLoadTest_V3_Scalability(t *testing.T) {
 	concurrencies := []int{10, 50, 100, 200, 500}
 	totalRequests := 500
 
-	t.Logf("=== V3 (Kafka) 压测: 库存=%d, 总请求=%d ===", stock, totalRequests)
+	t.Logf("=== V3 (recording fake writer) 应用内接入压测: 库存=%d, 总请求=%d ===", stock, totalRequests)
 	t.Logf("%-10s %-10s %-10s %-12s %-12s %-12s %-12s %-12s %-12s %-12s",
 		"并发", "成功", "失败", "QPS", "总耗时", "P50", "P90", "P95", "P99", "Max")
 
@@ -278,68 +306,7 @@ func TestLoadTest_V3_HighQPS(t *testing.T) {
 
 	r := runLoadTest(t, "V3_HighQPS", stock, concurrency, totalRequests, "V3")
 
-	t.Logf("=== V3 极限压测 ===")
-	t.Log(r.String())
-	t.Logf("成功率: %.2f%%", float64(r.SuccessCount)/float64(r.TotalRequests)*100)
-	t.Logf("错误分布:")
-	for msg, count := range r.ErrorBreakdown {
-		t.Logf("  %s: %d", msg, count)
-	}
-}
-
-// ─────────────────────── 压测：V3 同步模式对比 ───────────────────────
-
-// withSyncKafka 临时切换为同步 Kafka Writer 执行测试，执行后恢复
-func withSyncKafka(fn func()) {
-	syncWriter := &kafka.Writer{
-		Addr:     kafka.TCP(config.GlobalConfig.Kafka.Brokers...),
-		Topic:    config.GlobalConfig.Kafka.Topic,
-		Balancer: &kafka.LeastBytes{},
-		Async:    false,
-	}
-	origWriter := global.KafkaWriter
-	global.KafkaWriter = syncWriter
-	defer func() {
-		global.KafkaWriter = origWriter
-		syncWriter.Close()
-	}()
-	fn()
-}
-
-func TestLoadTest_V3_Sync_Scalability(t *testing.T) {
-	stock := 200
-	concurrencies := []int{10, 50, 100, 200, 500}
-	totalRequests := 500
-
-	t.Logf("=== V3_Sync (Kafka 同步) 压测: 库存=%d, 总请求=%d ===", stock, totalRequests)
-	t.Logf("%-10s %-10s %-10s %-12s %-12s %-12s %-12s %-12s %-12s %-12s",
-		"并发", "成功", "失败", "QPS", "总耗时", "P50", "P90", "P95", "P99", "Max")
-
-	for _, c := range concurrencies {
-		var r *LoadTestResult
-		withSyncKafka(func() {
-			r = runLoadTest(t, fmt.Sprintf("V3_Sync_C%d", c), stock, c, totalRequests, "V3")
-		})
-		t.Logf("%-10d %-10d %-10d %-12.1f %-12v %-12v %-12v %-12v %-12v %-12v",
-			r.Concurrency, r.SuccessCount, r.FailCount, r.QPS,
-			r.TotalDuration.Round(time.Millisecond),
-			r.P50.Round(time.Millisecond), r.P90.Round(time.Millisecond),
-			r.P95.Round(time.Millisecond), r.P99.Round(time.Millisecond),
-			r.MaxLatency.Round(time.Millisecond))
-	}
-}
-
-func TestLoadTest_V3_Sync_HighQPS(t *testing.T) {
-	stock := 1000
-	concurrency := 500
-	totalRequests := 2000
-
-	var r *LoadTestResult
-	withSyncKafka(func() {
-		r = runLoadTest(t, "V3_Sync_HighQPS", stock, concurrency, totalRequests, "V3")
-	})
-
-	t.Logf("=== V3_Sync 极限压测 ===")
+	t.Logf("=== V3 (recording fake writer) 应用内接入压测 ===")
 	t.Log(r.String())
 	t.Logf("成功率: %.2f%%", float64(r.SuccessCount)/float64(r.TotalRequests)*100)
 	t.Logf("错误分布:")
@@ -357,7 +324,7 @@ func TestLoadTest_SustainedLoad(t *testing.T) {
 
 	vid := uint64(time.Now().UnixNano() % 10000000)
 	setupSeckillData(t, vid, stock)
-	defer cleanupSeckillData(vid)
+	defer cleanupSeckillData(t, vid)
 
 	svc := NewVoucherOrderService()
 
@@ -375,13 +342,18 @@ func TestLoadTest_SustainedLoad(t *testing.T) {
 	semaphore := make(chan struct{}, concurrency)
 	startTime := time.Now()
 
-	// 持续发送请求直到超时
+	// 持续发送请求直到超时。先获取槽位再创建 goroutine，确保在途任务有上限。
 	requestId := 0
+load:
 	for {
 		select {
 		case <-ctx.Done():
-			goto wait
-		default:
+			break load
+		case semaphore <- struct{}{}:
+		}
+		if ctx.Err() != nil {
+			<-semaphore
+			break load
 		}
 
 		wg.Add(1)
@@ -389,7 +361,6 @@ func TestLoadTest_SustainedLoad(t *testing.T) {
 		userId := uint64(900000 + requestId)
 		go func(uid uint64) {
 			defer wg.Done()
-			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
 			reqCtx := setUserContext(uid)
@@ -408,7 +379,6 @@ func TestLoadTest_SustainedLoad(t *testing.T) {
 		}(userId)
 	}
 
-wait:
 	wg.Wait()
 	totalDuration := time.Since(startTime)
 
@@ -434,16 +404,30 @@ wait:
 		percentile(latencies, 95).Round(time.Microsecond),
 		percentile(latencies, 99).Round(time.Microsecond))
 	t.Logf("成功率: %.2f%%", float64(successCount)/float64(totalRequests)*100)
+	if successCount > int64(stock) {
+		t.Fatalf("successful reservations = %d, stock = %d", successCount, stock)
+	}
+	if redisStock := getRedisStock(t, vid); redisStock != stock-int(successCount) {
+		t.Fatalf("Redis stock = %d, want %d", redisStock, stock-int(successCount))
+	}
 
 	// 清理 channel
+	consumed := 0
 	for {
 		select {
 		case <-svc.ChannelExec.Tasks:
+			consumed++
 		default:
 			goto done
 		}
 	}
 done:
+	if successCount != int64(stock) {
+		t.Fatalf("successful reservations = %d, want stock %d", successCount, stock)
+	}
+	if consumed != int(successCount) {
+		t.Fatalf("channel entries = %d, want %d", consumed, successCount)
+	}
 }
 
 // getDBOrderCount 已在 voucher_order_test.go 中定义

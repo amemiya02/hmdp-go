@@ -6,15 +6,20 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/amemiya02/hmdp-go/internal/global"
 	"github.com/amemiya02/hmdp-go/internal/model/entity"
 	"github.com/segmentio/kafka-go"
 )
 
-type KafkaExecutor struct{}
+type MessageWriter interface {
+	WriteMessages(ctx context.Context, messages ...kafka.Message) error
+}
 
-func NewKafkaExecutor() *KafkaExecutor {
-	return &KafkaExecutor{}
+type KafkaExecutor struct {
+	writer MessageWriter
+}
+
+func NewKafkaExecutor(writer MessageWriter) *KafkaExecutor {
+	return &KafkaExecutor{writer: writer}
 }
 
 func (e *KafkaExecutor) Execute(ctx context.Context, order *entity.VoucherOrder) error {
@@ -28,5 +33,8 @@ func (e *KafkaExecutor) Execute(ctx context.Context, order *entity.VoucherOrder)
 		Value: orderBytes,
 	}
 
-	return global.KafkaWriter.WriteMessages(ctx, msg)
+	if err := e.writer.WriteMessages(ctx, msg); err != nil {
+		return fmt.Errorf("消息投递失败: %w", err)
+	}
+	return nil
 }

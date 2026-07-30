@@ -1,8 +1,9 @@
+//go:build manual
+
 package test
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"testing"
 
@@ -24,7 +25,7 @@ func TestLoadShopGeoDataToRedis(t *testing.T) {
 	ss := service.NewShopService()
 	shops, err := ss.ShopRepository.QueryAllShops(ctx)
 	if err != nil {
-		global.Logger.Error(fmt.Sprintf("预热GEO数据，查询店铺失败: %v", err))
+		t.Fatalf("预热 GEO 数据，查询店铺失败: %v", err)
 	}
 
 	// 2. 把店铺分组，按照 typeId 分组，typeId 一致的放到一个集合 (等价于 Java 的 groupingBy)
@@ -51,9 +52,9 @@ func TestLoadShopGeoDataToRedis(t *testing.T) {
 
 		// 3.2 批量写入 Redis (GEOADD key 经度 纬度 member ...)
 		if len(locations) > 0 {
-			// 注意：这里必须加上 ...，将切片打散作为可变参数传入
-			global.RedisClient.GeoAdd(ctx, key, locations...)
-
+			if err := global.RedisClient.GeoAdd(ctx, key, locations...).Err(); err != nil {
+				t.Fatalf("写入 %s: %v", key, err)
+			}
 		}
 	}
 

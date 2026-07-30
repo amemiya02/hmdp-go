@@ -3,72 +3,60 @@ package order
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
-	"time"
 
 	"github.com/amemiya02/hmdp-go/internal/model/entity"
+	"github.com/segmentio/kafka-go"
 )
 
-func TestKafkaExecutor_Execute_Success(t *testing.T) {
-	exec := NewKafkaExecutor()
+type messageWriterFunc func(context.Context, ...kafka.Message) error
 
-	order := &entity.VoucherOrder{
-		ID:        time.Now().UnixNano(),
-		UserID:    1001,
-		VoucherID: 2001,
-	}
-
-	// 验证写入 Kafka 不报错
-	err := exec.Execute(context.Background(), order)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
+func (f messageWriterFunc) WriteMessages(ctx context.Context, messages ...kafka.Message) error {
+	return f(ctx, messages...)
 }
 
-func TestKafkaExecutor_Execute_SerializationCheck(t *testing.T) {
+func TestKafkaExecutor_Execute(t *testing.T) {
 	order := &entity.VoucherOrder{
 		ID:        123456789,
-		UserID:    5555,
-		VoucherID: 6666,
-	}
-
-	// 验证序列化后的 JSON 结构
-	expectedBytes, _ := json.Marshal(order)
-	var expected map[string]interface{}
-	json.Unmarshal(expectedBytes, &expected)
-
-	if expected["userId"] != float64(5555) {
-		t.Errorf("expected userId=5555 in JSON, got %v", expected["userId"])
-	}
-	if expected["voucherId"] != float64(6666) {
-		t.Errorf("expected voucherId=6666 in JSON, got %v", expected["voucherId"])
-	}
-	if expected["id"] != float64(123456789) {
-		t.Errorf("expected id=123456789 in JSON, got %v", expected["id"])
-	}
-
-	// 实际发送
-	exec := NewKafkaExecutor()
-	err := exec.Execute(context.Background(), order)
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-}
-
-func TestKafkaExecutor_Execute_ContextCancellation(t *testing.T) {
-	exec := NewKafkaExecutor()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // 立即取消
-
-	order := &entity.VoucherOrder{
-		ID:        time.Now().UnixNano(),
 		UserID:    1001,
 		VoucherID: 2001,
 	}
 
-	err := exec.Execute(ctx, order)
-	if err == nil {
-		t.Log("note: kafka write succeeded despite cancelled context (may be buffered)")
-	}
+	t.Run("builds keyed order message", func(t *testing.T) {
+		var got kafka.Message
+		exec := NewKafkaExecutor(messageWriterFunc(func(_ context.Context, messages ...kafka.Message) error {
+			if len(messages) != 1 {
+				t.Fatalf("got %d messages, want 1", len(messages))
+			}
+			got = messages[0]
+			return nil
+		}))
+
+		if err := exec.Execute(context.Background(), order); err != nil {
+			t.Fatalf("Execute() error = %v", err)
+		}
+		if string(got.Key) != "1001" {
+			t.Fatalf("message key = %q, want %q", got.Key, "1001")
+		}
+
+		var decoded entity.VoucherOrder
+		if err := json.Unmarshal(got.Value, &decoded); err != nil {
+			t.Fatalf("decode message: %v", err)
+		}
+		if decoded.ID != order.ID || decoded.UserID != order.UserID || decoded.VoucherID != order.VoucherID {
+			t.Fatalf("decoded order = %+v, want IDs from %+v", decoded, order)
+		}
+	})
+
+	t.Run("propagates delivery failure", func(t *testing.T) {
+		wantErr := errors.New("broker unavailable")
+		exec := NewKafkaExecutor(messageWriterFunc(func(context.Context, ...kafka.Message) error {
+			return wantErr
+		}))
+
+		if err := exec.Execute(context.Background(), order); !errors.Is(err, wantErr) {
+			t.Fatalf("Execute() error = %v, want wrapped %v", err, wantErr)
+		}
+	})
 }

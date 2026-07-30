@@ -9,22 +9,25 @@ import (
 
 var KafkaWriter *kafka.Writer
 
-func init() {
-	// 初始化 Kafka 生产者 (Writer)
+func initKafkaWriter() {
 	KafkaWriter = &kafka.Writer{
-		Addr:      kafka.TCP(config.GlobalConfig.Kafka.Brokers...),
-		Topic:     config.GlobalConfig.Kafka.Topic,
-		Balancer:  &kafka.LeastBytes{}, // 负载均衡策略
-		Async:     true,                // 异步发送，提升吞吐量
-		BatchSize: 100,                 // 批量攒够 100 条再发
+		Addr:         kafka.TCP(config.GlobalConfig.Kafka.Brokers...),
+		Topic:        config.GlobalConfig.Kafka.Topic,
+		Balancer:     &kafka.Hash{},
+		RequiredAcks: kafka.RequireAll,
+		Async:        false,
+		MaxAttempts:  1, // Redis pending relay owns retries; keep request/shutdown latency bounded.
+		BatchSize:    100,
 		BatchTimeout: 10 * time.Millisecond, // 或每 10ms 发一批
+		WriteTimeout: 5 * time.Second,
 	}
 }
 
-// CloseKafkaWriter 在应用退出时关闭生产者，尽量保证缓冲区消息被刷出。
-func CloseKafkaWriter() error {
+func closeKafkaWriter() error {
 	if KafkaWriter == nil {
 		return nil
 	}
-	return KafkaWriter.Close()
+	writer := KafkaWriter
+	KafkaWriter = nil
+	return writer.Close()
 }

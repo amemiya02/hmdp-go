@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"github.com/amemiya02/hmdp-go/internal/constant"
 	"github.com/amemiya02/hmdp-go/internal/model/dto"
 	"github.com/amemiya02/hmdp-go/internal/service"
 	"github.com/amemiya02/hmdp-go/internal/util"
@@ -74,7 +75,7 @@ func (uh *UserHandler) QueryUserByID(c *gin.Context) {
 }
 
 func (uh *UserHandler) Logout(c *gin.Context) {
-	c.JSON(http.StatusOK, uh.UserService.Logout(c))
+	c.JSON(http.StatusOK, uh.UserService.Logout(c, c.GetHeader(constant.AuthorizationKey)))
 }
 
 func (uh *UserHandler) Sign(c *gin.Context) {

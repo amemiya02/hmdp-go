@@ -34,14 +34,9 @@ func (ss *ShopService) QueryShopById(c context.Context, id uint64) *dto.Result {
 	fallback := func() (*entity.Shop, error) {
 		return ss.ShopRepository.QueryShopById(c, id)
 	}
-	// shop, err := util.QueryWithPassThrough(c, global.RedisClient, key, constant.CacheShopTTL, fallback)
-
 	// 用互斥锁防击穿：
 	lockKey := constant.LockShopKey + strconv.FormatUint(id, 10)
 	shop, err := util.QueryWithMutex(c, global.RedisClient, key, lockKey, constant.CacheShopTTL*time.Minute, fallback)
-
-	// 用缓存预热+逻辑过期：
-	// shop, err := util.QueryWithLogicalExpire(c, global.RedisClient, key, lockKey, constant.CacheShopTTL*time.Minute, fallback)
 
 	if err != nil {
 		return dto.Fail("店铺不存在或查询失败！")
@@ -56,13 +51,14 @@ func (ss *ShopService) UpdateShop(c context.Context, shop *entity.Shop) error {
 		return errors.New("店铺ID不能为空！")
 	}
 	// 1.更新数据库
-	err := ss.ShopRepository.UpdateShopById(c, *shop)
-	if err != nil {
-		return nil
+	if err := ss.ShopRepository.UpdateShopById(c, *shop); err != nil {
+		return err
 	}
 	// 2. 删除缓存
 	key := constant.CacheShopKey + strconv.FormatUint(id, 10)
-	global.RedisClient.Del(c, key)
+	if err := global.RedisClient.Del(c, key).Err(); err != nil {
+		return fmt.Errorf("删除店铺缓存: %w", err)
+	}
 	return nil
 }
 

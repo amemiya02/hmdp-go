@@ -1,3 +1,5 @@
+//go:build manual
+
 package test
 
 import (
@@ -16,7 +18,10 @@ func TestHyperLogLog(t *testing.T) {
 	key := "hl2"
 
 	// 测试开始前，先清理一下旧数据，保证测试准确性
-	global.RedisClient.Del(ctx, key)
+	if err := global.RedisClient.Del(ctx, key).Err(); err != nil {
+		t.Fatalf("清理 HLL: %v", err)
+	}
+	defer global.RedisClient.Del(ctx, key)
 
 	// 定义一个容量为 1000 的切片，用于批量发送
 	// PFAdd 接收的参数是 ...interface{}，所以切片类型定义为 interface{}
@@ -44,6 +49,13 @@ func TestHyperLogLog(t *testing.T) {
 		t.Fatalf("PFCount 统计失败: %v", err)
 	}
 
-	// 5. 打印结果
-	fmt.Printf("插入了 1000000 条数据，HyperLogLog 统计结果 count = %d\n", count)
+	const total = int64(1000000)
+	delta := count - total
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > total/50 {
+		t.Fatalf("HyperLogLog 误差过大: count=%d, want within 2%% of %d", count, total)
+	}
+	t.Logf("插入 %d 条数据，HyperLogLog 统计结果=%d", total, count)
 }

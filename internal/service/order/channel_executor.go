@@ -17,6 +17,10 @@ func NewChannelExecutor(bufferSize int) *ChannelExecutor {
 }
 
 func (e *ChannelExecutor) Execute(ctx context.Context, order *entity.VoucherOrder) error {
-	e.Tasks <- order
-	return nil
+	select {
+	case e.Tasks <- order:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

@@ -2,6 +2,7 @@ package order
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -74,17 +75,12 @@ func TestChannelExecutor_Execute_ChannelFull(t *testing.T) {
 		exec.Execute(context.Background(), order)
 	}
 
-	// 第三个应该阻塞，用超时检测
+	// 队列满时遵循调用方取消，避免永久泄漏 goroutine。
 	order := &entity.VoucherOrder{ID: 99, UserID: 99}
-	done := make(chan error, 1)
-	go func() {
-		done <- exec.Execute(context.Background(), order)
-	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
 
-	select {
-	case <-done:
-		t.Fatal("expected Execute to block when channel is full")
-	case <-time.After(200 * time.Millisecond):
-		// 预期行为：阻塞了
+	if err := exec.Execute(ctx, order); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Execute() error = %v, want context deadline exceeded", err)
 	}
 }

@@ -1,6 +1,6 @@
 .idea/
 .vscode/
 internal/test/tokens.csv
-api
+/api
 .omc/
 docs/test*

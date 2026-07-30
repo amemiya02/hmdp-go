@@ -2,8 +2,8 @@ package order
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/amemiya02/hmdp-go/internal/global"
@@ -14,12 +14,13 @@ import (
 )
 
 const (
-	LockKeyPrefix  = "order:"
-	LockTimeOutSec = 100
+	lockKeyPrefix   = "order:"
+	lockTTLSeconds  = 100
+	lockWaitTimeout = 10 * time.Second
 )
 
 type SyncExecutor struct {
-	VoucherOrderRepository *repository.VoucherOrderRepository
+	VoucherOrderRepository   *repository.VoucherOrderRepository
 	SeckillVoucherRepository *repository.SeckillVoucherRepository
 }
 
@@ -31,20 +32,28 @@ func NewSyncExecutor(vor *repository.VoucherOrderRepository, svr *repository.Sec
 }
 
 func (e *SyncExecutor) Execute(ctx context.Context, order *entity.VoucherOrder) error {
-	lockName := LockKeyPrefix + strconv.FormatUint(order.UserID, 10)
-	redisLock := util.NewRedissonLock(ctx, lockName, global.RedisClient, 10*time.Second)
+	lockName := fmt.Sprintf("%s%d:%d", lockKeyPrefix, order.UserID, order.VoucherID)
+	redisLock := util.NewRedissonLock(ctx, lockName, global.RedisClient, lockWaitTimeout)
 
-	if !redisLock.TryLock(LockTimeOutSec) {
+	if !redisLock.TryLock(lockTTLSeconds) {
 		return fmt.Errorf("不允许重复下单！")
 	}
-	defer redisLock.Unlock()
+	defer func() {
+		if err := redisLock.Unlock(); err != nil {
+			global.Logger.Error("释放订单锁失败",
+				"user_id", order.UserID,
+				"voucher_id", order.VoucherID,
+				"error", err,
+			)
+		}
+	}()
 
 	orderCount, err := e.VoucherOrderRepository.CountVoucherOrderByUserIdAndVoucherId(ctx, order.UserID, order.VoucherID)
 	if err != nil {
 		return err
 	}
 	if orderCount > 0 {
-		return fmt.Errorf("用户已经购买过一次！")
+		return fmt.Errorf("%w: 用户已经购买过一次", ErrDuplicateOrder)
 	}
 
 	var tran = func(tx *gorm.DB) error {
@@ -54,5 +63,18 @@ func (e *SyncExecutor) Execute(ctx context.Context, order *entity.VoucherOrder) 
 		return e.VoucherOrderRepository.CreateVoucherOrder(tx, order)
 	}
 
-	return global.Db.WithContext(ctx).Transaction(tran)
+	err = global.Db.WithContext(ctx).Transaction(tran)
+	if errors.Is(err, gorm.ErrDuplicatedKey) {
+		orderCount, countErr := e.VoucherOrderRepository.CountVoucherOrderByUserIdAndVoucherId(
+			ctx, order.UserID, order.VoucherID,
+		)
+		if countErr != nil {
+			return errors.Join(err, fmt.Errorf("确认重复订单: %w", countErr))
+		}
+		if orderCount > 0 {
+			return fmt.Errorf("%w: 一人一券唯一约束冲突", ErrDuplicateOrder)
+		}
+		return fmt.Errorf("订单 ID 唯一约束冲突: %w", err)
+	}
+	return err
 }
